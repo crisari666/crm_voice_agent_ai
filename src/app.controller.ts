@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpCode, Post, Query, Res } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppService } from './app.service';
+import { CallService } from './call-service/call.service';
 import { Twilio } from 'twilio';
 import type { Response } from 'express';
 
@@ -11,6 +12,7 @@ export class AppController {
   constructor(
     private readonly appService: AppService,
     private readonly configService: ConfigService,
+    private readonly callService: CallService,
   ) {
   }
 
@@ -27,73 +29,10 @@ export class AppController {
   }
 
   @Post('/iniciar-llamada')
-  public async handleIniciarLlamada(
-    @Body() body: any,
-    @Res() res: Response,
-  ): Promise<void> {
-    const twilioClient = this.ensureTwilioClient();
+  @HttpCode(200)
+  public async handleIniciarLlamada(@Body() body: any): Promise<string> {
     console.log('📞 Iniciando llamada...');
-
-    const { websocketUrl, fromNumber, toNumber, ...additionalParams } = body ?? {};
-
-    const customerPhoneNumber =
-      toNumber ?? this.configService.get<string>('CUSTOMER_PHONE_NUMBER');
-    const twilioPhoneNumber =
-      fromNumber ?? this.configService.get<string>('TWILIO_PHONE_NUMBER');
-
-    if (!customerPhoneNumber || !twilioPhoneNumber) {
-      res.status(500).send(
-        'Error: Phone numbers are required. Either provide fromNumber and toNumber in request body or set CUSTOMER_PHONE_NUMBER and TWILIO_PHONE_NUMBER environment variables',
-      );
-      return;
-    }
-
-    console.log({ websocketUrl, additionalParams });
-
-    if (!websocketUrl) {
-      res.status(400).send('Error: websocketUrl parameter is required');
-      return;
-    }
-
-    try {
-      const twiml = `
-        <Response>
-            <Say voice="alice" language="es-ES">Hola, esta es una llamada de prueba.</Say>
-            <Connect>
-            <Stream url="${websocketUrl}">
-                ${Object.entries(additionalParams)
-                  .map(([key, value]) => `<Parameter name="${key}" value="${value}" />`)
-                  .join('\n')}
-              </Stream>
-            </Connect>
-        </Response>
-      `;
-
-      console.log('🔗 Calling from:', twilioPhoneNumber, 'to:', customerPhoneNumber);
-
-      await twilioClient.calls.create({
-        to: customerPhoneNumber,
-        from: twilioPhoneNumber,
-        twiml,
-        statusCallback: `${this.configService.get<string>('TWILIO_STATUS_CALLBACK_URL')}/status-change-2`,
-        statusCallbackMethod: 'POST',
-        statusCallbackEvent: [
-          'queued',
-          'no-answer',
-          'ringing',
-          'answered',
-          'canceled',
-          'failed',
-          'completed',
-          'busy',
-        ],
-      });
-
-      res.send('Llamada iniciada. Revisa tu teléfono.');
-    } catch (error) {
-      console.error('❌ Error al iniciar la llamada:', error);
-      res.status(500).send('Error al iniciar la llamada.');
-    }
+    return this.callService.initiateCall(body);
   }
 
   @Post('/twiml')

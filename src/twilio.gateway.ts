@@ -1,20 +1,50 @@
 import { ConfigService } from '@nestjs/config';
 import { OnGatewayInit, WebSocketGateway } from '@nestjs/websockets';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject } from '@nestjs/common';
 import { WebSocket } from 'ws';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WebSocketServer as NativeWebSocketServer } from 'ws';
+import { ClientProxy } from '@nestjs/microservices';
+import { lastValueFrom } from 'rxjs';
 import { TwilioAudioProcessor } from './types/twilio-audio-processor';
-import { FUNCTION_MAP } from './config/function-map';
+import { createFunctionMap, type ScheduleAppointmentParams } from './config/function-map';
+
+type CrmBackEventSourceType = 'ws_ms_events' | 'voice_agent_ms_events';
+
+interface CrmBackEventPayload {
+  readonly type: CrmBackEventSourceType;
+  readonly payload: Record<string, unknown>;
+}
 
 @Injectable()
 @WebSocketGateway({ path: '/twilio' })
 export class TwilioGateway implements OnGatewayInit {
   private agentConfig: Record<string, unknown>;
   private readonly deepgramApiKey: string;
+  private readonly functionMap: ReturnType<typeof createFunctionMap>;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @Inject('CRM_BACK_QUEUE') private readonly crmBackQueueClient: ClientProxy,
+  ) {
+    this.functionMap = createFunctionMap({
+      emitCallCompletedSuccessfully: async (input: Readonly<{ flowId: string; userId: string }>) => {
+        // Emitted into monolith to advance the onboarding flow.
+        console.info('🔔 Emitting call.completed_successfully event to CRM Back:', JSON.stringify(input, null, 2));
+        const event: CrmBackEventPayload = {
+          type: 'voice_agent_ms_events',
+          payload: {
+            action: 'call.completed_successfully',
+            flowId: input.flowId,
+            userId: input.userId,
+          },
+        };
+
+        await lastValueFrom(this.crmBackQueueClient.emit('voice_agent_ms_event', event));
+      },
+    });
+
     const deepgramApiKey = this.configService.get<string>('DEEPGRAM_API_KEY');
     if (!deepgramApiKey) {
       throw new Error('DEEPGRAM_API_KEY is required');
@@ -48,8 +78,12 @@ export class TwilioGateway implements OnGatewayInit {
     connectionTimeout: NodeJS.Timeout,
   ): Promise<void> {
     try {
-      const callContext: { customer_name?: string; allowInterrupt?: boolean } =
-        {};
+      const callContext: {
+        customer_name?: string;
+        allowInterrupt?: boolean;
+        flowId?: string;
+        customer_id?: string;
+      } = {};
 
       // Native ws connection to Deepgram (no SDK).
       const deepgramConnection = new WebSocket(
@@ -78,6 +112,7 @@ export class TwilioGateway implements OnGatewayInit {
         try {
           const messageStr = data.toString();
           const message = JSON.parse(messageStr);
+          console.log('🎤 Received from Deepgram:', message);
 
           if (typeof message === 'object') {
             await this.handleTextMessage(
@@ -129,6 +164,12 @@ export class TwilioGateway implements OnGatewayInit {
             if (params.customer_name != null) {
               callContext.customer_name = String(params.customer_name).trim();
             }
+            if (params.flowId != null) {
+              callContext.flowId = String(params.flowId).trim();
+            }
+            if (params.customer_id != null) {
+              callContext.customer_id = String(params.customer_id).trim();
+            }
           }
 
           const messageObj = { type: 'utf8', utf8Data: raw };
@@ -163,9 +204,15 @@ export class TwilioGateway implements OnGatewayInit {
     twilioWs: WebSocket,
     deepgramConnection: WebSocket,
     streamSid: string | null,
-    callContext: { customer_name?: string; allowInterrupt?: boolean },
+    callContext: {
+      customer_name?: string;
+      allowInterrupt?: boolean;
+      flowId?: string;
+      customer_id?: string;
+    },
   ): Promise<void> {
     if (message.type === 'UserStartedSpeaking') {
+      console.log({ callContext, streamSid });
       if (callContext.allowInterrupt && streamSid) {
         twilioWs.send(JSON.stringify({ event: 'clear', streamSid }));
       }
@@ -175,6 +222,8 @@ export class TwilioGateway implements OnGatewayInit {
       const content: string = message.content ?? '';
       if (content.includes('Te explico rápidamente')) {
         callContext.allowInterrupt = true;
+      } else {
+
       }
     }
 
@@ -186,7 +235,12 @@ export class TwilioGateway implements OnGatewayInit {
   private async handleFunctionCallRequest(
     message: any,
     deepgramConnection: WebSocket,
-    callContext: { customer_name?: string; allowInterrupt?: boolean },
+    callContext: {
+      customer_name?: string;
+      allowInterrupt?: boolean;
+      flowId?: string;
+      customer_id?: string;
+    },
   ): Promise<void> {
     try {
       for (const functionCall of message.functions) {
@@ -199,8 +253,17 @@ export class TwilioGateway implements OnGatewayInit {
         }
 
         let result: any;
-        if (funcName in FUNCTION_MAP) {
-          result = FUNCTION_MAP[funcName](arguments_);
+        if (funcName === 'scheduleAppointment') {
+          const scheduleArgs = arguments_ as ScheduleAppointmentParams;
+          arguments_ = {
+            ...scheduleArgs,
+            flowId: scheduleArgs.flowId ?? callContext.flowId,
+            userId: scheduleArgs.userId ?? callContext.customer_id,
+          };
+        }
+
+        if (funcName in this.functionMap) {
+          result = await this.functionMap[funcName](arguments_);
         } else {
           result = { error: `Unknown function: ${funcName}` };
         }
