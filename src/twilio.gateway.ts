@@ -20,7 +20,7 @@ interface CrmBackEventPayload {
 @Injectable()
 @WebSocketGateway({ path: '/twilio' })
 export class TwilioGateway implements OnGatewayInit {
-  private agentConfig: Record<string, unknown>;
+  private readonly agentConfigTemplate: Record<string, unknown>;
   private readonly deepgramApiKey: string;
 
   constructor(
@@ -36,7 +36,7 @@ export class TwilioGateway implements OnGatewayInit {
     // Loaded once on startup (same behavior as Express server).
     const configPath = path.join(process.cwd(), 'config_lotes.json');
     const configData = fs.readFileSync(configPath, 'utf8');
-    this.agentConfig = JSON.parse(configData);
+    this.agentConfigTemplate = JSON.parse(configData);
   }
 
   afterInit(server: NativeWebSocketServer): void {
@@ -133,12 +133,18 @@ export class TwilioGateway implements OnGatewayInit {
 
       deepgramConnection.on('open', () => {
         clearTimeout(connectionTimeout);
-        // Customize greeting using the customer name received in `start` event.
-        this.agentConfig['agent']['greeting'] = String(
-          (this.agentConfig['agent'] as any)?.greeting ?? '',
-        ).replace( 'CUSTOMER_NAME', callContext.customer_name ?? '');
+        // Clone config per-call to avoid leaking previous caller context.
+        const connectionAgentConfig = JSON.parse(
+          JSON.stringify(this.agentConfigTemplate),
+        ) as Record<string, unknown>;
 
-        deepgramConnection.send(JSON.stringify(this.agentConfig));
+        // Customize greeting using the customer name received in `start` event.
+        const agent = (connectionAgentConfig['agent'] as any) ?? {};
+        const greetingTemplate = String(agent.greeting ?? '');
+        agent.greeting = greetingTemplate.replace('CUSTOMER_NAME', callContext.customer_name ?? '');
+        connectionAgentConfig['agent'] = agent;
+
+        deepgramConnection.send(JSON.stringify(connectionAgentConfig));
       });
 
       deepgramConnection.on('message', async (data: Buffer) => {
@@ -342,7 +348,7 @@ export class TwilioGateway implements OnGatewayInit {
         const funcName = functionCall.name;
         const funcId = functionCall.id;
         let arguments_ = JSON.parse(functionCall.arguments || '{}');
-
+        console.log('[handleFunctionCallRequest]', { funcName, funcId, arguments_ });
         if (funcName === 'scheduleAppointment' || funcName === 'disabledUser') {
           // After the agent executes these tools, we want to end the call
           // right after the agent's final audio (goodbye).
