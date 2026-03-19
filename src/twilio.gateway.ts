@@ -22,29 +22,11 @@ interface CrmBackEventPayload {
 export class TwilioGateway implements OnGatewayInit {
   private agentConfig: Record<string, unknown>;
   private readonly deepgramApiKey: string;
-  private readonly functionMap: ReturnType<typeof createFunctionMap>;
 
   constructor(
     private readonly configService: ConfigService,
     @Inject('CRM_BACK_QUEUE') private readonly crmBackQueueClient: ClientProxy,
   ) {
-    this.functionMap = createFunctionMap({
-      emitCallCompletedSuccessfully: async (input: Readonly<{ flowId: string; userId: string }>) => {
-        // Emitted into monolith to advance the onboarding flow.
-        console.info('🔔 Emitting call.completed_successfully event to CRM Back:', JSON.stringify(input, null, 2));
-        const event: CrmBackEventPayload = {
-          type: 'voice_agent_ms_events',
-          payload: {
-            action: 'call.completed_successfully',
-            flowId: input.flowId,
-            userId: input.userId,
-          },
-        };
-
-        await lastValueFrom(this.crmBackQueueClient.emit('voice_agent_ms_event', event));
-      },
-    });
-
     const deepgramApiKey = this.configService.get<string>('DEEPGRAM_API_KEY');
     if (!deepgramApiKey) {
       throw new Error('DEEPGRAM_API_KEY is required');
@@ -73,6 +55,42 @@ export class TwilioGateway implements OnGatewayInit {
     });
   }
 
+  private async emitCallCompletedSuccessfullyToCrm(
+    input: Readonly<{ flowId: string; userId: string; customer_id?: string }>,
+  ): Promise<void> {
+    // Emitted into monolith to advance the onboarding flow.
+    console.info(
+      '🔔 Emitting call.completed_successfully event to CRM Back:',
+      JSON.stringify(input, null, 2),
+    );
+    const event: CrmBackEventPayload = {
+      type: 'voice_agent_ms_events',
+      payload: {
+        action: 'call.completed_successfully',
+        flowId: input.flowId,
+        userId: input.userId,
+        customer_id: input.customer_id,
+      },
+    };
+
+    await lastValueFrom(this.crmBackQueueClient.emit('voice_agent_ms_event', event));
+  }
+
+  private isGoodbyeText(text: string | undefined): boolean {
+    const t = (text ?? '').toLowerCase();
+    // Heuristic: detect common Spanish farewell fragments.
+    return (
+      t.includes('adiós') ||
+      t.includes('adios') ||
+      t.includes('hasta luego') ||
+      t.includes('hasta pronto') ||
+      t.includes('feliz dia') ||
+      t.includes('feliz día') ||
+      t.includes('que tengas') ||
+      (t.includes('gracias') && (t.includes('tiempo') || t.includes('buen') || t.includes('feliz')))
+    );
+  }
+
   private async handleTwilioConnection(
     ws: WebSocket,
     connectionTimeout: NodeJS.Timeout,
@@ -83,7 +101,25 @@ export class TwilioGateway implements OnGatewayInit {
         allowInterrupt?: boolean;
         flowId?: string;
         customer_id?: string;
+        lastAssistantText?: string;
+        pendingCallCompleted?: Readonly<{ flowId: string; userId: string; customer_id?: string }> | null;
+        shouldHangupAfterAgentAudioDone?: boolean;
+        isHangingUp?: boolean;
       } = {};
+
+      // Per-connection function map:
+      // - Deepgram can request tool calls at any time
+      // - We delay emitting `call.completed_successfully` until the conversation is actually finished
+      const functionMap = createFunctionMap({
+        emitCallCompletedSuccessfully: async (input: Readonly<{ flowId: string; userId: string }>) => {
+          callContext.pendingCallCompleted = {
+            ...input,
+            // The monolith expects `customer_id` from the Twilio start params.
+            // If it's missing, fall back to the same value we have as `userId`.
+            customer_id: callContext.customer_id ?? input.userId,
+          };
+        },
+      });
 
       // Native ws connection to Deepgram (no SDK).
       const deepgramConnection = new WebSocket(
@@ -100,10 +136,7 @@ export class TwilioGateway implements OnGatewayInit {
         // Customize greeting using the customer name received in `start` event.
         this.agentConfig['agent']['greeting'] = String(
           (this.agentConfig['agent'] as any)?.greeting ?? '',
-        ).replace(
-          'CUSTOMER_NAME',
-          callContext.customer_name ?? '',
-        );
+        ).replace( 'CUSTOMER_NAME', callContext.customer_name ?? '');
 
         deepgramConnection.send(JSON.stringify(this.agentConfig));
       });
@@ -121,6 +154,7 @@ export class TwilioGateway implements OnGatewayInit {
               deepgramConnection,
               audioProcessor.getStreamSid(),
               callContext,
+              functionMap,
             );
           }
         } catch {
@@ -142,6 +176,22 @@ export class TwilioGateway implements OnGatewayInit {
 
       deepgramConnection.on('close', () => {
         console.log('🚪 Conexión con Deepgram cerrada.');
+        void (async () => {
+          // If Deepgram ends the conversation without us already hanging up,
+          // still complete the CRM event and close the Twilio media stream.
+          if (!callContext.isHangingUp && callContext.pendingCallCompleted) {
+            await this.emitCallCompletedSuccessfullyToCrm(callContext.pendingCallCompleted);
+            callContext.pendingCallCompleted = null;
+          }
+
+          try {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.close();
+            }
+          } catch (error) {
+            console.error('❌ Error closing Twilio WS after Deepgram close:', error);
+          }
+        })();
       });
 
       deepgramConnection.on('error', (error: unknown) => {
@@ -209,7 +259,12 @@ export class TwilioGateway implements OnGatewayInit {
       allowInterrupt?: boolean;
       flowId?: string;
       customer_id?: string;
+      lastAssistantText?: string;
+      pendingCallCompleted?: Readonly<{ flowId: string; userId: string }> | null;
+      shouldHangupAfterAgentAudioDone?: boolean;
+      isHangingUp?: boolean;
     },
+    functionMap: ReturnType<typeof createFunctionMap>,
   ): Promise<void> {
     if (message.type === 'UserStartedSpeaking') {
       console.log({ callContext, streamSid });
@@ -220,6 +275,7 @@ export class TwilioGateway implements OnGatewayInit {
 
     if (message.type === 'ConversationText' && message.role === 'assistant') {
       const content: string = message.content ?? '';
+      callContext.lastAssistantText = content;
       if (content.includes('Te explico rápidamente')) {
         callContext.allowInterrupt = true;
       } else {
@@ -227,8 +283,45 @@ export class TwilioGateway implements OnGatewayInit {
       }
     }
 
+    if (message.type === 'AgentAudioDone') {
+      if (
+        callContext.shouldHangupAfterAgentAudioDone &&
+        !callContext.isHangingUp
+      ) {
+        const lastAssistantText = callContext.lastAssistantText ?? '';
+        if (lastAssistantText && !this.isGoodbyeText(lastAssistantText)) {
+          // Wait for Deepgram to finish and/or ensure the farewell is spoken.
+          return;
+        }
+
+        callContext.isHangingUp = true;
+        callContext.shouldHangupAfterAgentAudioDone = false;
+
+        if (callContext.pendingCallCompleted) {
+          await this.emitCallCompletedSuccessfullyToCrm(callContext.pendingCallCompleted);
+          callContext.pendingCallCompleted = null;
+        }
+
+        // At this point the agent finished speaking its final goodbye.
+        // Close the Twilio media stream to ensure the actual call hangs up.
+        try {
+          if (twilioWs.readyState === WebSocket.OPEN) {
+            twilioWs.close();
+          }
+        } catch (error) {
+          console.error('❌ Error closing Twilio WS after AgentAudioDone:', error);
+        }
+
+        try {
+          deepgramConnection.close();
+        } catch {
+          // ignore
+        }
+      }
+    }
+
     if (message.type === 'FunctionCallRequest') {
-      await this.handleFunctionCallRequest(message, deepgramConnection, callContext);
+      await this.handleFunctionCallRequest(message, deepgramConnection, callContext, functionMap);
     }
   }
 
@@ -240,13 +333,21 @@ export class TwilioGateway implements OnGatewayInit {
       allowInterrupt?: boolean;
       flowId?: string;
       customer_id?: string;
+      shouldHangupAfterAgentAudioDone?: boolean;
     },
+    functionMap: ReturnType<typeof createFunctionMap>,
   ): Promise<void> {
     try {
       for (const functionCall of message.functions) {
         const funcName = functionCall.name;
         const funcId = functionCall.id;
         let arguments_ = JSON.parse(functionCall.arguments || '{}');
+
+        if (funcName === 'scheduleAppointment' || funcName === 'disabledUser') {
+          // After the agent executes these tools, we want to end the call
+          // right after the agent's final audio (goodbye).
+          callContext.shouldHangupAfterAgentAudioDone = true;
+        }
 
         if (funcName === 'getContactName') {
           arguments_ = { ...arguments_, customer_name: callContext.customer_name ?? '' };
@@ -262,8 +363,8 @@ export class TwilioGateway implements OnGatewayInit {
           };
         }
 
-        if (funcName in this.functionMap) {
-          result = await this.functionMap[funcName](arguments_);
+        if (funcName in functionMap) {
+          result = await (functionMap as any)[funcName](arguments_);
         } else {
           result = { error: `Unknown function: ${funcName}` };
         }
