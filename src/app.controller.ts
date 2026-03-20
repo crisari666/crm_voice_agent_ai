@@ -60,6 +60,8 @@ export class AppController {
       </Response>
     `;
 
+    console.log('🔗 Twiml generated:', twiml);
+
     res.type('text/xml');
     res.send(twiml);
   }

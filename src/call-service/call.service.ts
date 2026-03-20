@@ -75,6 +75,8 @@ export class CallService {
         ],
       });
 
+      console.log('🔗 Twiml generated:', twiml);
+
       return 'Llamada iniciada. Revisa tu teléfono.';
     } catch (error) {
       console.error('❌ Error al iniciar la llamada:', error);
