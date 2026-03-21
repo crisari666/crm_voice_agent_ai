@@ -14,7 +14,7 @@ async function bootstrap() {
   const rabbitMqUser = process.env.RABBIT_MQ_USER || 'guest';
   const rabbitMqPass = process.env.RABBIT_MQ_PASS || 'guest';
   const rabbitMqUrl = `amqp://${rabbitMqUser}:${rabbitMqPass}@localhost:5672`;
-  app.setGlobalPrefix('voice-agent');
+  app.setGlobalPrefix('voice-agent', { exclude: ['/twilio'] });
   app.connectMicroservice<MicroserviceOptions>({
     transport: Transport.RMQ,
     options: {
