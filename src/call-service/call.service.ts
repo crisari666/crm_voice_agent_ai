@@ -33,7 +33,7 @@ export class CallService {
     }
 
     console.log({ websocketUrl, additionalParams });
-
+    const isProd = this.configService.get<boolean>('IS_PROD');
     if (!websocketUrl) {
       throw new BadRequestException('Error: websocketUrl parameter is required');
     }
@@ -41,7 +41,7 @@ export class CallService {
     try {
       const twiml = `
         <Response>
-            <Say voice="alice" language="es-ES">Hola, esta es una llamada de prueba.</Say>
+            ${isProd ? '' : '<Say voice="alice" language="es-ES">Hola, esta es una llamada de prueba.</Say>'}
             <Connect>
             <Stream url="${websocketUrl}">
                 ${Object.entries(additionalParams)
