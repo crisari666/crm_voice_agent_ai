@@ -1,7 +1,13 @@
-import { Controller } from '@nestjs/common';
+import { Controller, Inject } from '@nestjs/common';
 import { EventPattern, Payload } from '@nestjs/microservices';
+import { ClientProxy } from '@nestjs/microservices';
+import { lastValueFrom } from 'rxjs';
 import type { CallInitiateParams } from './call-service/call.service';
 import { CallService } from './call-service/call.service';
+import {
+  VoiceAgentCrmBackTranscriptService,
+  type EmitCallTranscriptCompleteInput,
+} from './voice-agent-crm-back-transcript.service';
 
 type CrmBackEventSourceType = 'ws_ms_events' | 'voice_agent_ms_events';
 
@@ -12,7 +18,18 @@ interface CrmBackEventPayload {
 
 @Controller()
 export class VoiceAgentEventsController {
-  public constructor(private readonly callService: CallService) {}
+  public constructor(
+    private readonly callService: CallService,
+    private readonly transcriptService: VoiceAgentCrmBackTranscriptService,
+    @Inject('CRM_BACK_QUEUE') private readonly crmBackQueueClient: ClientProxy,
+  ) {}
+
+  /** Emits `call.transcript_complete` on `crm_back_queue` for monolith onboarding / analytics. */
+  public async sendCallTranscriptToBackend(
+    input: EmitCallTranscriptCompleteInput,
+  ): Promise<void> {
+    await this.transcriptService.emitCallTranscriptComplete(input);
+  }
 
   @EventPattern('ms_voice_agent')
   public async handleMs2Event(@Payload() event: CrmBackEventPayload): Promise<void> {
@@ -27,16 +44,35 @@ export class VoiceAgentEventsController {
       const customerName = payload.customer_name != null ? String(payload.customer_name) : '';
       const userId = payload.userId != null ? String(payload.userId) : '';
       const flowId = payload.flowId != null ? String(payload.flowId) : '';
+      const fromNumber =
+        payload.fromNumber != null ? String(payload.fromNumber) : '';
 
       const callParams: CallInitiateParams = {
         websocketUrl,
         toNumber,
+        fromNumber: fromNumber.length > 0 ? fromNumber : undefined,
         customer_name: customerName,
         customer_id: userId,
         flowId,
       };
 
-      await this.callService.initiateCall(callParams);
+      try {
+        await this.callService.initiateCall(callParams);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error('VoiceAgentEventsController: call.trigger_request failed', message);
+        await lastValueFrom(
+          this.crmBackQueueClient.emit('voice_agent_ms_event', {
+            type: 'voice_agent_ms_events',
+            payload: {
+              action: 'call.init_failed',
+              flowId,
+              userId,
+              reason: message,
+            },
+          } as CrmBackEventPayload),
+        );
+      }
     }
   }
 }

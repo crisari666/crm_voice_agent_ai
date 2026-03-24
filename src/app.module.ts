@@ -6,6 +6,7 @@ import { CallService } from './call-service/call.service';
 import { TwilioGateway } from './twilio.gateway';
 import { ClientsModule, Transport } from '@nestjs/microservices';
 import { VoiceAgentEventsController } from './voice-agent-events.controller';
+import { VoiceAgentCrmBackTranscriptService } from './voice-agent-crm-back-transcript.service';
 
 @Module({
   imports: [
@@ -35,6 +36,6 @@ import { VoiceAgentEventsController } from './voice-agent-events.controller';
     ]),
   ],
   controllers: [AppController, VoiceAgentEventsController],
-  providers: [AppService, TwilioGateway, CallService],
+  providers: [AppService, TwilioGateway, CallService, VoiceAgentCrmBackTranscriptService],
 })
 export class AppModule {}

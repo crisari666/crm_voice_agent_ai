@@ -1,5 +1,6 @@
+import type { IncomingMessage } from 'http';
 import { ConfigService } from '@nestjs/config';
-import { OnGatewayInit, WebSocketGateway } from '@nestjs/websockets';
+import { OnGatewayConnection, OnGatewayInit, WebSocketGateway } from '@nestjs/websockets';
 import { Injectable, Inject } from '@nestjs/common';
 import { WebSocket } from 'ws';
 import * as fs from 'fs';
@@ -9,6 +10,7 @@ import { ClientProxy } from '@nestjs/microservices';
 import { lastValueFrom } from 'rxjs';
 import { TwilioAudioProcessor } from './types/twilio-audio-processor';
 import { createFunctionMap, type ScheduleAppointmentParams } from './config/function-map';
+import { VoiceAgentCrmBackTranscriptService } from './voice-agent-crm-back-transcript.service';
 
 type CrmBackEventSourceType = 'ws_ms_events' | 'voice_agent_ms_events';
 
@@ -19,13 +21,14 @@ interface CrmBackEventPayload {
 
 @Injectable()
 @WebSocketGateway({ path: '/twilio' })
-export class TwilioGateway implements OnGatewayInit {
+export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
   private readonly agentConfigTemplate: Record<string, unknown>;
   private readonly deepgramApiKey: string;
 
   constructor(
     private readonly configService: ConfigService,
     @Inject('CRM_BACK_QUEUE') private readonly crmBackQueueClient: ClientProxy,
+    private readonly crmBackTranscriptService: VoiceAgentCrmBackTranscriptService,
   ) {
     const deepgramApiKey = this.configService.get<string>('DEEPGRAM_API_KEY');
     if (!deepgramApiKey) {
@@ -37,6 +40,11 @@ export class TwilioGateway implements OnGatewayInit {
     const configPath = path.join(process.cwd(), 'config_lotes.json');
     const configData = fs.readFileSync(configPath, 'utf8');
     this.agentConfigTemplate = JSON.parse(configData);
+  }
+
+  /** Nest `ws` adapter: fired once per new client on this gateway path (before message handlers attach). */
+  handleConnection(client: WebSocket, request?: IncomingMessage): void {
+    this.onTwilioConnectionNew(client, request);
   }
 
   afterInit(server: NativeWebSocketServer): void {
@@ -52,6 +60,16 @@ export class TwilioGateway implements OnGatewayInit {
 
     server.on('error', (error: unknown) => {
       console.error('❌ WebSocket server error:', error);
+    });
+  }
+
+  private onTwilioConnectionNew(ws: WebSocket, request?: IncomingMessage): void {
+    const remote = request?.socket?.remoteAddress ?? 'unknown';
+    const url = request?.url ?? '';
+    console.log('🔌 New Twilio WebSocket connection', {
+      remote,
+      url,
+      readyState: ws.readyState,
     });
   }
 
@@ -74,6 +92,60 @@ export class TwilioGateway implements OnGatewayInit {
     };
 
     await lastValueFrom(this.crmBackQueueClient.emit('voice_agent_ms_event', event));
+  }
+
+  /**
+   * Frees the Twilio caller-ID pool row when the media stream ends (hangup, error, timeout).
+   * Idempotent with `call.completed_successfully` (monolith release is per flowId).
+   */
+  private async emitVoiceConnectionClosedToCrm(flowId: string | undefined): Promise<void> {
+    if (flowId == null || flowId.length === 0) return;
+    try {
+      await lastValueFrom(
+        this.crmBackQueueClient.emit('voice_agent_ms_event', {
+          type: 'voice_agent_ms_events',
+          payload: {
+            action: 'call.voice_connection_closed',
+            flowId,
+          },
+        } as CrmBackEventPayload),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('TwilioGateway: emitVoiceConnectionClosedToCrm failed', message);
+    }
+  }
+
+  private formatTranscriptFromSegments(
+    segments: ReadonlyArray<{ readonly role: string; readonly content: string }>,
+  ): string {
+    return segments.map((s) => `${s.role}: ${s.content}`).join('\n\n');
+  }
+
+  private async emitCallTranscriptIfNeeded(callContext: {
+    flowId?: string;
+    customer_id?: string;
+    callSid?: string;
+    transcriptSegments: Array<{ role: string; content: string }>;
+    transcriptSentToCrm: boolean;
+  }): Promise<void> {
+    if (callContext.transcriptSentToCrm) return;
+    const flowId = callContext.flowId;
+    const userId = callContext.customer_id;
+    if (!flowId || !userId) return;
+
+    const segments = callContext.transcriptSegments;
+    const transcript = this.formatTranscriptFromSegments(segments);
+
+    await this.crmBackTranscriptService.emitCallTranscriptComplete({
+      flowId,
+      userId,
+      customer_id: userId,
+      callSid: callContext.callSid,
+      transcript,
+      segments,
+    });
+    callContext.transcriptSentToCrm = true;
   }
 
   private isGoodbyeText(text: string | undefined): boolean {
@@ -101,11 +173,17 @@ export class TwilioGateway implements OnGatewayInit {
         allowInterrupt?: boolean;
         flowId?: string;
         customer_id?: string;
+        callSid?: string;
         lastAssistantText?: string;
         pendingCallCompleted?: Readonly<{ flowId: string; userId: string; customer_id?: string }> | null;
         shouldHangupAfterAgentAudioDone?: boolean;
         isHangingUp?: boolean;
-      } = {};
+        transcriptSegments: Array<{ role: string; content: string }>;
+        transcriptSentToCrm: boolean;
+      } = {
+        transcriptSegments: [],
+        transcriptSentToCrm: false,
+      };
 
       // Per-connection function map:
       // - Deepgram can request tool calls at any time
@@ -185,6 +263,7 @@ export class TwilioGateway implements OnGatewayInit {
         void (async () => {
           // If Deepgram ends the conversation without us already hanging up,
           // still complete the CRM event and close the Twilio media stream.
+          await this.emitCallTranscriptIfNeeded(callContext);
           if (!callContext.isHangingUp && callContext.pendingCallCompleted) {
             await this.emitCallCompletedSuccessfullyToCrm(callContext.pendingCallCompleted);
             callContext.pendingCallCompleted = null;
@@ -211,12 +290,17 @@ export class TwilioGateway implements OnGatewayInit {
             event?: string;
             start?: {
               streamSid?: string;
+              callSid?: string;
               customParameters?: Record<string, string>;
             };
           };
 
           if (twilioMsg.event === 'start') {
-            const params = twilioMsg.start?.customParameters ?? {};
+            const start = twilioMsg.start;
+            if (start?.callSid != null) {
+              callContext.callSid = String(start.callSid).trim();
+            }
+            const params = start?.customParameters ?? {};
             if (params.customer_name != null) {
               callContext.customer_name = String(params.customer_name).trim();
             }
@@ -242,6 +326,7 @@ export class TwilioGateway implements OnGatewayInit {
           'Reason:',
           reason.toString(),
         );
+        void this.emitVoiceConnectionClosedToCrm(callContext.flowId);
         deepgramConnection.close();
       });
 
@@ -265,13 +350,26 @@ export class TwilioGateway implements OnGatewayInit {
       allowInterrupt?: boolean;
       flowId?: string;
       customer_id?: string;
+      callSid?: string;
       lastAssistantText?: string;
       pendingCallCompleted?: Readonly<{ flowId: string; userId: string }> | null;
       shouldHangupAfterAgentAudioDone?: boolean;
       isHangingUp?: boolean;
+      transcriptSegments: Array<{ role: string; content: string }>;
+      transcriptSentToCrm: boolean;
     },
     functionMap: ReturnType<typeof createFunctionMap>,
   ): Promise<void> {
+    if (message.type === 'ConversationText') {
+      const role = typeof message.role === 'string' ? message.role : 'unknown';
+      const rawContent = message.content;
+      const content =
+        typeof rawContent === 'string' ? rawContent.trim() : String(rawContent ?? '').trim();
+      if (content.length > 0) {
+        callContext.transcriptSegments.push({ role, content });
+      }
+    }
+
     if (message.type === 'UserStartedSpeaking') {
       console.log({ callContext, streamSid });
       if (callContext.allowInterrupt && streamSid) {
@@ -304,6 +402,7 @@ export class TwilioGateway implements OnGatewayInit {
         callContext.shouldHangupAfterAgentAudioDone = false;
 
         if (callContext.pendingCallCompleted) {
+          await this.emitCallTranscriptIfNeeded(callContext);
           await this.emitCallCompletedSuccessfullyToCrm(callContext.pendingCallCompleted);
           callContext.pendingCallCompleted = null;
         }
@@ -339,7 +438,10 @@ export class TwilioGateway implements OnGatewayInit {
       allowInterrupt?: boolean;
       flowId?: string;
       customer_id?: string;
+      callSid?: string;
       shouldHangupAfterAgentAudioDone?: boolean;
+      transcriptSegments: Array<{ role: string; content: string }>;
+      transcriptSentToCrm: boolean;
     },
     functionMap: ReturnType<typeof createFunctionMap>,
   ): Promise<void> {
