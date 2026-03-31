@@ -33,34 +33,41 @@ export class CallService {
     }
 
     console.log({ websocketUrl, additionalParams });
-    const isProd = this.configService.get<boolean>('IS_PROD');
     if (!websocketUrl) {
       throw new BadRequestException('Error: websocketUrl parameter is required');
     }
 
     try {
-      const twiml = `
-        <Response>
-            ${isProd ? '' : '<Say voice="alice" language="es-ES">Hola, esta es una llamada de prueba.</Say>'}
-            <Connect>
-            <Stream url="${websocketUrl}">
-                ${Object.entries(additionalParams)
-                  .map(
-                    ([key, value]) =>
-                      `<Parameter name="${key}" value="${String(value)}" />`,
-                  )
-                  .join('\n')}
-              </Stream>
-            </Connect>
-        </Response>
-      `;
+      const statusBaseUrl = this.configService.get<string>('TWILIO_STATUS_CALLBACK_URL');
+      const amdStatusUrl =
+        this.configService.get<string>('TWILIO_AMD_STATUS_CALLBACK_URL') ??
+        (statusBaseUrl != null && statusBaseUrl.length > 0
+          ? `${statusBaseUrl.replace(/\/$/, '')}/amd-status`
+          : undefined);
+
+      const twimlUrl = this.buildTwimlRequestUrl(websocketUrl, additionalParams);
+      if (!twimlUrl) {
+        throw new InternalServerErrorException(
+          'Set TWILIO_TWIML_URL or TWILIO_STATUS_CALLBACK_URL so the outbound call can fetch TwiML from /twiml',
+        );
+      }
 
       console.log('🔗 Calling from:', twilioPhoneNumber, 'to:', customerPhoneNumber);
+      console.log('🔗 TwiML URL:', twimlUrl);
 
       await this.ensureTwilioClient().calls.create({
         to: customerPhoneNumber,
         from: twilioPhoneNumber,
-        twiml,
+        url: twimlUrl,
+        method: 'POST',
+        ...(amdStatusUrl != null && amdStatusUrl.length > 0
+          ? {
+              machineDetection: 'Enable',
+              asyncAmd: 'true',
+              asyncAmdStatusCallback: amdStatusUrl,
+              asyncAmdStatusCallbackMethod: 'POST' as const,
+            }
+          : {}),
         statusCallback: `${this.configService.get<string>('TWILIO_STATUS_CALLBACK_URL')}/status-change-2`,
         statusCallbackMethod: 'POST',
         statusCallbackEvent: [
@@ -75,13 +82,38 @@ export class CallService {
         ],
       });
 
-      console.log('🔗 Twiml generated:', twiml);
-
       return 'Llamada iniciada. Revisa tu teléfono.';
     } catch (error) {
       console.error('❌ Error al iniciar la llamada:', error);
       throw new InternalServerErrorException('Error al iniciar la llamada.');
     }
+  }
+
+  /**
+   * Public TwiML endpoint (see AppController GET/POST `/twiml`). Twilio loads this URL when the call is answered.
+   */
+  private buildTwimlRequestUrl(
+    websocketUrl: string,
+    additionalParams: Record<string, unknown>,
+  ): string | undefined {
+    const explicit = this.configService.get<string>('TWILIO_TWIML_URL')?.trim();
+    const statusBase = this.configService.get<string>('TWILIO_STATUS_CALLBACK_URL')?.replace(/\/$/, '');
+    const base =
+      explicit && explicit.length > 0
+        ? explicit.replace(/\/$/, '')
+        : statusBase != null && statusBase.length > 0
+          ? `${statusBase}/twiml`
+          : undefined;
+    if (!base) return undefined;
+
+    const qs = new URLSearchParams();
+    qs.set('websocketUrl', websocketUrl);
+    for (const [key, value] of Object.entries(additionalParams)) {
+      if (value === undefined || value === null) continue;
+      qs.set(key, String(value));
+    }
+
+    return `${base}?${qs.toString()}`;
   }
 
   private ensureTwilioClient(): Twilio {
@@ -98,4 +130,3 @@ export class CallService {
     return this.twilioClient;
   }
 }
-

@@ -1,9 +1,19 @@
-import { Body, Controller, Get, HttpCode, Post, Query, Res } from '@nestjs/common';
+import { All, Body, Controller, Get, HttpCode, Post, Query, Res } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppService } from './app.service';
 import { CallService } from './call-service/call.service';
+import { escapeXmlAttr } from './common/xml-escape';
 import { Twilio } from 'twilio';
 import type { Response } from 'express';
+
+/** Twilio AMD `AnsweredBy` values that mean voicemail/machine or fax — end the call. */
+const ANSWERED_BY_SHOULD_HANGUP = new Set([
+  'machine_start',
+  'machine_end_beep',
+  'machine_end_silence',
+  'machine_end_other',
+  'fax',
+]);
 
 @Controller()
 export class AppController {
@@ -35,35 +45,52 @@ export class AppController {
     return this.callService.initiateCall(body);
   }
 
-  @Post('/twiml')
+  /**
+   * Twilio fetches this URL when `calls.create({ url })` connects (GET or POST).
+   * Query: required `websocketUrl` (wss://…); any other keys become `<Parameter name value>` on the Stream.
+   */
+  @All('/twiml')
   @HttpCode(200)
-  public handleTwiML(
-    @Query('websocketUrl') websocketUrl: string,
-    @Res() res: Response,
-  ): void {
-    console.log('📄 Generando TwiML para la llamada...');
+  public handleTwiML(@Query() query: Record<string, string | string[] | undefined>, @Res() res: Response): void {
+    console.log('📄 TwiML request:', JSON.stringify(query));
 
-    if (!websocketUrl) {
-      console.error('❌ Error: websocketUrl parameter is required');
-      res.status(400).send('Error: websocketUrl parameter is required');
+    const rawWs = query.websocketUrl;
+    const websocketUrl = Array.isArray(rawWs) ? rawWs[0] : rawWs;
+
+    if (!websocketUrl || String(websocketUrl).trim().length === 0) {
+      console.error('❌ Error: websocketUrl query parameter is required');
+      res.status(400).send('Error: websocketUrl query parameter is required');
       return;
     }
 
-    console.log('🔗 WebSocket URL for TwiML:', websocketUrl);
+    const streamUrl = escapeXmlAttr(String(websocketUrl).trim());
+    const isProd = this.configService.get<boolean>('IS_PROD');
+
+    const parameterLines = Object.entries(query)
+      .filter(([key]) => key !== 'websocketUrl')
+      .map(([key, val]) => {
+        const v = Array.isArray(val) ? val[0] : val;
+        if (v === undefined || v === '') return '';
+        return `<Parameter name="${escapeXmlAttr(key)}" value="${escapeXmlAttr(String(v))}" />`;
+      })
+      .filter(Boolean)
+      .join('\n                ');
 
     const twiml = `
-      <Response>
-          <Say voice="alice" language="es-ES"> Hola. </Say>
-          <Connect>
-            <Stream url="${encodeURIComponent(websocketUrl)}"/>
-          </Connect>
-      </Response>
-    `;
+        <Response>
+            ${isProd ? '' : '<Say voice="alice" language="es-ES">Hola, esta es una llamada de prueba.</Say>'}
+            <Connect>
+                <Stream url="${streamUrl}">
+                ${parameterLines}
+                </Stream>
+            </Connect>
+        </Response>
+      `;
 
-    console.log('🔗 Twiml generated:', twiml);
+    console.log('🔗 TwiML generated (Connect + Stream + parameters)');
 
     res.type('text/xml');
-    res.send(twiml);
+    res.send(twiml.trim());
   }
 
   @Post('/call-income')
@@ -96,11 +123,13 @@ export class AppController {
 
     console.log(`🤖 AMD status for call ${CallSid}: ${AnsweredBy}`);
 
-    if (AnsweredBy === 'machine_start') {
-      console.log(`🤖 Answering machine detected for call ${CallSid}. Hanging up.`);
+    if (typeof CallSid === 'string' && CallSid.length > 0 && ANSWERED_BY_SHOULD_HANGUP.has(String(AnsweredBy))) {
+      console.log(`🤖 Voicemail/machine/fax detected for call ${CallSid} (${AnsweredBy}). Hanging up.`);
       const twilioClient = this.ensureTwilioClient();
-      void twilioClient.calls(CallSid).update({ status: 'completed' })
-        .then(() => console.log(`📞 Call ${CallSid} terminated.`))
+      void twilioClient
+        .calls(CallSid)
+        .update({ status: 'completed' })
+        .then(() => console.log(`📞 Call ${CallSid} terminated (AMD).`))
         .catch((error: unknown) =>
           console.error(`❌ Error terminating call ${CallSid}:`, error),
         );
