@@ -1,19 +1,13 @@
-import { All, Body, Controller, Get, HttpCode, Post, Query, Res } from '@nestjs/common';
+import { All, Body, Controller, Get, HttpCode, Inject, Post, Query, Res } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppService } from './app.service';
 import { CallService } from './call-service/call.service';
 import { escapeXmlAttr } from './common/xml-escape';
 import { Twilio } from 'twilio';
+import { ClientProxy } from '@nestjs/microservices';
 import type { Response } from 'express';
-
-/** Twilio AMD `AnsweredBy` values that mean voicemail/machine or fax — end the call. */
-const ANSWERED_BY_SHOULD_HANGUP = new Set([
-  'machine_start',
-  'machine_end_beep',
-  'machine_end_silence',
-  'machine_end_other',
-  'fax',
-]);
+import { lastValueFrom } from 'rxjs';
+import { ANSWERED_BY_SHOULD_HANGUP, CrmBackEventPayload } from './app.constants';
 
 @Controller()
 export class AppController {
@@ -23,6 +17,7 @@ export class AppController {
     private readonly appService: AppService,
     private readonly configService: ConfigService,
     private readonly callService: CallService,
+    @Inject('CRM_BACK_QUEUE') private readonly crmBackQueueClient: ClientProxy,
   ) {
   }
 
@@ -118,13 +113,28 @@ export class AppController {
   }
 
   @Post('/amd-status')
-  public handleAmdStatus(@Body() body: any, @Res() res: Response): void {
+  public handleAmdStatus(
+    @Body() body: Record<string, unknown>,
+    @Query('flowId') queryFlowId: string | undefined,
+    @Query('userId') queryUserId: string | undefined,
+    @Res() res: Response,
+  ): void {
     const { AnsweredBy, CallSid } = body ?? {};
 
     console.log(`🤖 AMD status for call ${CallSid}: ${AnsweredBy}`);
 
     if (typeof CallSid === 'string' && CallSid.length > 0 && ANSWERED_BY_SHOULD_HANGUP.has(String(AnsweredBy))) {
       console.log(`🤖 Voicemail/machine/fax detected for call ${CallSid} (${AnsweredBy}). Hanging up.`);
+      const flowId = this.getOptionalNonEmptyString(body.flowId) ?? this.getOptionalNonEmptyString(queryFlowId);
+      const userId = this.getOptionalNonEmptyString(body.userId) ?? this.getOptionalNonEmptyString(queryUserId);
+      if (flowId != null || userId != null) {
+        void this.emitVoicemailDetectedToCrmBack({
+          flowId,
+          userId,
+          answeredBy: String(AnsweredBy),
+          callSid: CallSid,
+        });
+      }
       const twilioClient = this.ensureTwilioClient();
       void twilioClient
         .calls(CallSid)
@@ -156,5 +166,36 @@ export class AppController {
 
     this.twilioClient = new Twilio(accountSid, authToken);
     return this.twilioClient;
+  }
+
+  private getOptionalNonEmptyString(value: unknown): string | null {
+    if (typeof value !== 'string') {
+      return null;
+    }
+    const trimmedValue = value.trim();
+    return trimmedValue.length > 0 ? trimmedValue : null;
+  }
+
+  private async emitVoicemailDetectedToCrmBack(input: {
+    readonly flowId?: string | null;
+    readonly userId?: string | null;
+    readonly answeredBy: string;
+    readonly callSid: string;
+  }): Promise<void> {
+    const event: CrmBackEventPayload = {
+      type: 'voice_agent_ms_events',
+      payload: {
+        action: 'call.voicemail_detected',
+        ...(input.flowId != null ? { flowId: input.flowId } : {}),
+        ...(input.userId != null ? { userId: input.userId } : {}),
+        answeredBy: input.answeredBy,
+        callSid: input.callSid,
+      },
+    };
+    try {
+      await lastValueFrom(this.crmBackQueueClient.emit('voice_agent_ms_event', event));
+    } catch (error) {
+      console.error('❌ Error emitting call.voicemail_detected to CRM Back:', error);
+    }
   }
 }

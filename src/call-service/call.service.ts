@@ -44,6 +44,13 @@ export class CallService {
         (statusBaseUrl != null && statusBaseUrl.length > 0
           ? `${statusBaseUrl.replace(/\/$/, '')}/amd-status`
           : undefined);
+      const flowId = typeof additionalParams.flowId === 'string' ? additionalParams.flowId.trim() : '';
+      const userId = typeof additionalParams.customer_id === 'string' ? additionalParams.customer_id.trim() : '';
+      const amdStatusCallbackUrl = this.buildAmdStatusCallbackUrl({
+        baseUrl: amdStatusUrl,
+        flowId,
+        userId,
+      });
 
       const twimlUrl = this.buildTwimlRequestUrl(websocketUrl, additionalParams);
       if (!twimlUrl) {
@@ -60,11 +67,11 @@ export class CallService {
         from: twilioPhoneNumber,
         url: twimlUrl,
         method: 'POST',
-        ...(amdStatusUrl != null && amdStatusUrl.length > 0
+        ...(amdStatusCallbackUrl != null && amdStatusCallbackUrl.length > 0
           ? {
               machineDetection: 'Enable',
               asyncAmd: 'true',
-              asyncAmdStatusCallback: amdStatusUrl,
+              asyncAmdStatusCallback: amdStatusCallbackUrl,
               asyncAmdStatusCallbackMethod: 'POST' as const,
             }
           : {}),
@@ -114,6 +121,30 @@ export class CallService {
     }
 
     return `${base}?${qs.toString()}`;
+  }
+
+  private buildAmdStatusCallbackUrl(input: {
+    readonly baseUrl?: string;
+    readonly flowId?: string;
+    readonly userId?: string;
+  }): string | undefined {
+    const baseUrl = input.baseUrl?.trim();
+    if (baseUrl == null || baseUrl.length === 0) {
+      return undefined;
+    }
+    const flowId = input.flowId?.trim() ?? '';
+    const userId = input.userId?.trim() ?? '';
+    if (flowId.length === 0 && userId.length === 0) {
+      return baseUrl;
+    }
+    const url = new URL(baseUrl);
+    if (flowId.length > 0) {
+      url.searchParams.set('flowId', flowId);
+    }
+    if (userId.length > 0) {
+      url.searchParams.set('userId', userId);
+    }
+    return url.toString();
   }
 
   private ensureTwilioClient(): Twilio {
