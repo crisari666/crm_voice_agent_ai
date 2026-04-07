@@ -123,11 +123,11 @@ export class AppController {
   ): void {
     console.log('🔄 Status second change received:', body);
     const callStatus = this.getOptionalNonEmptyString(body.CallStatus)?.toLowerCase();
+    const flowId =
+      this.getOptionalNonEmptyString(body.flowId) ?? this.getOptionalNonEmptyString(queryFlowId);
+    const userId =
+      this.getOptionalNonEmptyString(body.userId) ?? this.getOptionalNonEmptyString(queryUserId);
     if (callStatus != null && TERMINAL_CALL_STATUSES.has(callStatus)) {
-      const flowId =
-        this.getOptionalNonEmptyString(body.flowId) ?? this.getOptionalNonEmptyString(queryFlowId);
-      const userId =
-        this.getOptionalNonEmptyString(body.userId) ?? this.getOptionalNonEmptyString(queryUserId);
       if (flowId != null || userId != null) {
         void this.emitVoiceConnectionClosedToCrm({
           flowId,
@@ -135,7 +135,16 @@ export class AppController {
           callStatus,
           callSid: this.getOptionalNonEmptyString(body.CallSid),
         });
+      } else {
+        console.warn(
+          'Skipping call.voice_connection_closed event. Missing flowId and userId in /status-change-2 payload.',
+        );
       }
+    } else {
+      console.warn(
+        'Skipping call.voice_connection_closed event. Invalid or non-terminal call status.',
+        body.CallStatus,
+      );
     }
     res.status(200).json({ status: 'ok' });
   }

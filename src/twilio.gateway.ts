@@ -76,6 +76,13 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
   private async emitCallCompletedSuccessfullyToCrm(
     input: Readonly<{ flowId: string; userId: string; customer_id?: string }>,
   ): Promise<void> {
+    if (input.flowId.trim().length === 0 || input.userId.trim().length === 0) {
+      console.warn(
+        'TwilioGateway: skipping call.completed_successfully emit due to missing flowId or userId',
+        input,
+      );
+      return;
+    }
     // Emitted into monolith to advance the onboarding flow.
     console.info(
       '🔔 Emitting call.completed_successfully event to CRM Back:',
