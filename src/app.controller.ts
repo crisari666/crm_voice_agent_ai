@@ -9,6 +9,14 @@ import type { Response } from 'express';
 import { lastValueFrom } from 'rxjs';
 import { ANSWERED_BY_SHOULD_HANGUP, CrmBackEventPayload } from './app.constants';
 
+const TERMINAL_CALL_STATUSES: ReadonlySet<string> = new Set([
+  'completed',
+  'busy',
+  'failed',
+  'no-answer',
+  'canceled',
+]);
+
 @Controller()
 export class AppController {
   private twilioClient?: Twilio;
@@ -107,8 +115,28 @@ export class AppController {
   }
 
   @Post('/status-change-2')
-  public handleStatusChange2(@Body() body: unknown, @Res() res: Response): void {
-    console.log('🔄 Status secod change received:', body);
+  public handleStatusChange2(
+    @Body() body: Record<string, unknown>,
+    @Query('flowId') queryFlowId: string | undefined,
+    @Query('userId') queryUserId: string | undefined,
+    @Res() res: Response,
+  ): void {
+    console.log('🔄 Status second change received:', body);
+    const callStatus = this.getOptionalNonEmptyString(body.CallStatus)?.toLowerCase();
+    if (callStatus != null && TERMINAL_CALL_STATUSES.has(callStatus)) {
+      const flowId =
+        this.getOptionalNonEmptyString(body.flowId) ?? this.getOptionalNonEmptyString(queryFlowId);
+      const userId =
+        this.getOptionalNonEmptyString(body.userId) ?? this.getOptionalNonEmptyString(queryUserId);
+      if (flowId != null || userId != null) {
+        void this.emitVoiceConnectionClosedToCrm({
+          flowId,
+          userId,
+          callStatus,
+          callSid: this.getOptionalNonEmptyString(body.CallSid),
+        });
+      }
+    }
     res.status(200).json({ status: 'ok' });
   }
 
@@ -196,6 +224,29 @@ export class AppController {
       await lastValueFrom(this.crmBackQueueClient.emit('voice_agent_ms_event', event));
     } catch (error) {
       console.error('❌ Error emitting call.voicemail_detected to CRM Back:', error);
+    }
+  }
+
+  private async emitVoiceConnectionClosedToCrm(input: {
+    readonly flowId?: string | null;
+    readonly userId?: string | null;
+    readonly callStatus: string;
+    readonly callSid?: string | null;
+  }): Promise<void> {
+    const event: CrmBackEventPayload = {
+      type: 'voice_agent_ms_events',
+      payload: {
+        action: 'call.voice_connection_closed',
+        ...(input.flowId != null ? { flowId: input.flowId } : {}),
+        ...(input.userId != null ? { userId: input.userId } : {}),
+        callStatus: input.callStatus,
+        ...(input.callSid != null ? { callSid: input.callSid } : {}),
+      },
+    };
+    try {
+      await lastValueFrom(this.crmBackQueueClient.emit('voice_agent_ms_event', event));
+    } catch (error) {
+      console.error('❌ Error emitting call.voice_connection_closed to CRM Back:', error);
     }
   }
 }

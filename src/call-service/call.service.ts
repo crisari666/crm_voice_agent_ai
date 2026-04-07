@@ -52,6 +52,11 @@ export class CallService {
         userId,
       });
 
+      const statusCallbackUrl = this.buildStatusCallbackUrl({
+        baseUrl: this.configService.get<string>('TWILIO_STATUS_CALLBACK_URL'),
+        flowId,
+        userId,
+      });
       const twimlUrl = this.buildTwimlRequestUrl(websocketUrl, additionalParams);
       if (!twimlUrl) {
         throw new InternalServerErrorException(
@@ -75,7 +80,9 @@ export class CallService {
               asyncAmdStatusCallbackMethod: 'POST' as const,
             }
           : {}),
-        statusCallback: `${this.configService.get<string>('TWILIO_STATUS_CALLBACK_URL')}/status-change-2`,
+        ...(statusCallbackUrl != null && statusCallbackUrl.length > 0
+          ? { statusCallback: statusCallbackUrl }
+          : {}),
         statusCallbackMethod: 'POST',
         statusCallbackEvent: [
           'queued',
@@ -138,6 +145,27 @@ export class CallService {
       return baseUrl;
     }
     const url = new URL(baseUrl);
+    if (flowId.length > 0) {
+      url.searchParams.set('flowId', flowId);
+    }
+    if (userId.length > 0) {
+      url.searchParams.set('userId', userId);
+    }
+    return url.toString();
+  }
+
+  private buildStatusCallbackUrl(input: {
+    readonly baseUrl?: string;
+    readonly flowId?: string;
+    readonly userId?: string;
+  }): string | undefined {
+    const baseUrl = input.baseUrl?.trim();
+    if (baseUrl == null || baseUrl.length === 0) {
+      return undefined;
+    }
+    const url = new URL(`${baseUrl.replace(/\/$/, '')}/status-change-2`);
+    const flowId = input.flowId?.trim() ?? '';
+    const userId = input.userId?.trim() ?? '';
     if (flowId.length > 0) {
       url.searchParams.set('flowId', flowId);
     }
