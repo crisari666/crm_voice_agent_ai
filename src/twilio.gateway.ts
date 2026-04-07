@@ -19,11 +19,37 @@ interface CrmBackEventPayload {
   readonly payload: Record<string, unknown>;
 }
 
+type VoicemailDetectionConfig = Readonly<{
+  enabled: boolean;
+  closeTwilioWsOnDetected: boolean;
+  detectInRoles: ReadonlySet<string>;
+  patterns: ReadonlyArray<string>;
+}>;
+
+const DEFAULT_VOICEMAIL_DETECTION_CONFIG: VoicemailDetectionConfig = {
+  enabled: true,
+  closeTwilioWsOnDetected: true,
+  detectInRoles: new Set(['user']),
+  patterns: [
+    'buzon de voz',
+    'buzón de voz',
+    'deja tu mensaje',
+    'deje su mensaje',
+    'dejar tu mensaje',
+    'no puedo atender',
+    'despues del tono',
+    'después del tono',
+    'grabe su mensaje',
+    'casilla de voz',
+  ],
+};
+
 @Injectable()
 @WebSocketGateway({ path: '/twilio' })
 export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
   private readonly agentConfigTemplate: Record<string, unknown>;
   private readonly deepgramApiKey: string;
+  private readonly voicemailDetectionConfig: VoicemailDetectionConfig;
 
   constructor(
     private readonly configService: ConfigService,
@@ -40,6 +66,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
     const configPath = path.join(process.cwd(), 'config_lotes.json');
     const configData = fs.readFileSync(configPath, 'utf8');
     this.agentConfigTemplate = JSON.parse(configData);
+    this.voicemailDetectionConfig = DEFAULT_VOICEMAIL_DETECTION_CONFIG;
   }
 
   /** Nest `ws` adapter: fired once per new client on this gateway path (before message handlers attach). */
@@ -170,6 +197,16 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
     );
   }
 
+  private isVoicemailTextDetected(role: string, content: string): boolean {
+    const config = this.voicemailDetectionConfig;
+    if (!config.enabled || config.patterns.length === 0) return false;
+    const normalizedRole = role.trim().toLowerCase();
+    if (config.detectInRoles.size > 0 && !config.detectInRoles.has(normalizedRole)) return false;
+    const normalizedContent = content.trim().toLowerCase();
+    if (normalizedContent.length === 0) return false;
+    return config.patterns.some((pattern) => normalizedContent.includes(pattern));
+  }
+
   private async handleTwilioConnection(
     ws: WebSocket,
     connectionTimeout: NodeJS.Timeout,
@@ -187,9 +224,11 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
         isHangingUp?: boolean;
         transcriptSegments: Array<{ role: string; content: string }>;
         transcriptSentToCrm: boolean;
+        voicemailDetected: boolean;
       } = {
         transcriptSegments: [],
         transcriptSentToCrm: false,
+        voicemailDetected: false,
       };
 
       // Per-connection function map:
@@ -364,6 +403,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
       isHangingUp?: boolean;
       transcriptSegments: Array<{ role: string; content: string }>;
       transcriptSentToCrm: boolean;
+      voicemailDetected: boolean;
     },
     functionMap: ReturnType<typeof createFunctionMap>,
   ): Promise<void> {
@@ -374,6 +414,19 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
         typeof rawContent === 'string' ? rawContent.trim() : String(rawContent ?? '').trim();
       if (content.length > 0) {
         callContext.transcriptSegments.push({ role, content });
+        if (!callContext.voicemailDetected && this.isVoicemailTextDetected(role, content)) {
+          callContext.voicemailDetected = true;
+          callContext.isHangingUp = true;
+          console.log('📴 Voicemail detected from conversation text. Closing call to save credits.');
+          await this.emitCallTranscriptIfNeeded(callContext);
+          if (this.voicemailDetectionConfig.closeTwilioWsOnDetected && twilioWs.readyState === WebSocket.OPEN) {
+            twilioWs.close();
+          }
+          if (deepgramConnection.readyState === WebSocket.OPEN) {
+            deepgramConnection.close();
+          }
+          return;
+        }
       }
     }
 
