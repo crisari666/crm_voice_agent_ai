@@ -41,6 +41,7 @@ const DEFAULT_VOICEMAIL_DETECTION_CONFIG: VoicemailDetectionConfig = {
     'después del tono',
     'grabe su mensaje',
     'casilla de voz',
+    "este es el servicio de contestador"
   ],
 };
 

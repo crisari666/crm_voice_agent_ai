@@ -158,7 +158,7 @@ export class AppController {
   ): void {
     const { AnsweredBy, CallSid } = body ?? {};
 
-    console.log(`🤖 AMD status for call ${CallSid}: ${AnsweredBy}`);
+    console.log(`🤖 AMD status for call ${CallSid}: ${AnsweredBy}, ${JSON.stringify(body, null, 2)}`);
 
     if (typeof CallSid === 'string' && CallSid.length > 0 && ANSWERED_BY_SHOULD_HANGUP.has(String(AnsweredBy))) {
       console.log(`🤖 Voicemail/machine/fax detected for call ${CallSid} (${AnsweredBy}). Hanging up.`);
