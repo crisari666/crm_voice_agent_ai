@@ -5,7 +5,6 @@ export const ANSWERED_BY_SHOULD_HANGUP: ReadonlySet<string> = new Set([
   'machine_end_silence',
   'machine_end_other',
   'fax',
-  'unknown',
 ]);
 
 export type CrmBackEventPayload = Readonly<{
