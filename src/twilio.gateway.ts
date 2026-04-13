@@ -45,6 +45,23 @@ const DEFAULT_VOICEMAIL_DETECTION_CONFIG: VoicemailDetectionConfig = {
   ],
 };
 
+/** Twilio Media Streams may send the same logical fields under different `<Parameter name>` keys. */
+function pickTwilioStreamStringParam(
+  params: Record<string, string | undefined>,
+  keys: string[],
+): string | undefined {
+  for (const key of keys) {
+    const raw = params[key];
+    if (raw === undefined || raw === null) continue;
+    const s = String(raw).trim();
+    if (s.length > 0) return s;
+  }
+  return undefined;
+}
+
+/** `answeredBy` value when voicemail is inferred from live STT (not Twilio AMD). */
+const VOICEMAIL_ANSWERED_BY_FROM_CONVERSATION = 'conversation_voicemail';
+
 @Injectable()
 @WebSocketGateway({ path: '/twilio' })
 export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
@@ -102,7 +119,12 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
   }
 
   private async emitCallCompletedSuccessfullyToCrm(
-    input: Readonly<{ flowId: string; userId: string; customer_id?: string }>,
+    input: Readonly<{
+      flowId: string;
+      userId: string;
+      customer_id?: string;
+      contactNameFromCall?: string;
+    }>,
   ): Promise<void> {
     if (input.flowId.trim().length === 0 || input.userId.trim().length === 0) {
       console.warn(
@@ -116,6 +138,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
       '🔔 Emitting call.completed_successfully event to CRM Back:',
       JSON.stringify(input, null, 2),
     );
+    const trimmedContactName = input.contactNameFromCall?.trim();
     const event: CrmBackEventPayload = {
       type: 'voice_agent_ms_events',
       payload: {
@@ -123,9 +146,51 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
         flowId: input.flowId,
         userId: input.userId,
         customer_id: input.customer_id,
+        ...(trimmedContactName != null && trimmedContactName.length > 0
+          ? { contactNameFromCall: trimmedContactName }
+          : {}),
       },
     };
 
+    await lastValueFrom(this.crmBackQueueClient.emit('voice_agent_ms_event', event));
+  }
+
+  /**
+   * Emitted when the Deepgram agent invokes `scheduleAppointment` so the monolith can send
+   * `confirmar_capacitacion` while the call is still active (not on hangup).
+   */
+  private async emitScheduleAppointmentConfirmarToCrm(
+    input: Readonly<{
+      flowId: string;
+      userId: string;
+      customer_id?: string;
+      contactNameFromCall?: string;
+    }>,
+  ): Promise<void> {
+    if (input.flowId.trim().length === 0 || input.userId.trim().length === 0) {
+      console.warn(
+        'TwilioGateway: skipping call.schedule_appointment_completed emit due to missing flowId or userId',
+        input,
+      );
+      return;
+    }
+    const trimmedContactName = input.contactNameFromCall?.trim();
+    const event: CrmBackEventPayload = {
+      type: 'voice_agent_ms_events',
+      payload: {
+        action: 'call.schedule_appointment_completed',
+        flowId: input.flowId,
+        userId: input.userId,
+        customer_id: input.customer_id,
+        ...(trimmedContactName != null && trimmedContactName.length > 0
+          ? { contactNameFromCall: trimmedContactName }
+          : {}),
+      },
+    };
+    console.info(
+      'Emitting call.schedule_appointment_completed (confirmar_capacitacion) to CRM Back:',
+      JSON.stringify(event.payload, null, 2),
+    );
     await lastValueFrom(this.crmBackQueueClient.emit('voice_agent_ms_event', event));
   }
 
@@ -149,6 +214,54 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
       const message = error instanceof Error ? error.message : String(error);
       console.error('TwilioGateway: emitVoiceConnectionClosedToCrm failed', message);
     }
+  }
+
+  /**
+   * Same payload shape as `AppController.handleAmdStatus` → `call.voicemail_detected`.
+   * Used when STT text matches buzón / contestador patterns instead of Twilio AMD.
+   */
+  private async emitVoicemailDetectedFromConversationToCrm(input: Readonly<{
+    flowId?: string;
+    userId?: string;
+    callSid?: string;
+  }>): Promise<void> {
+    const flowId = input.flowId?.trim() ?? '';
+    const userId = input.userId?.trim() ?? '';
+    if (flowId.length === 0 && userId.length === 0) {
+      console.warn(
+        'TwilioGateway: skipping call.voicemail_detected (need flowId or userId, like AMD callback)',
+        input,
+      );
+      return;
+    }
+    const callSid = input.callSid?.trim() ?? '';
+    const event: CrmBackEventPayload = {
+      type: 'voice_agent_ms_events',
+      payload: {
+        action: 'call.voicemail_detected',
+        ...(flowId.length > 0 ? { flowId } : {}),
+        ...(userId.length > 0 ? { userId } : {}),
+        answeredBy: VOICEMAIL_ANSWERED_BY_FROM_CONVERSATION,
+        ...(callSid.length > 0 ? { callSid } : {}),
+      },
+    };
+    try {
+      console.info(
+        'Emitting call.voicemail_detected (conversation/STT):',
+        JSON.stringify(event.payload, null, 2),
+      );
+      await lastValueFrom(this.crmBackQueueClient.emit('voice_agent_ms_event', event));
+    } catch (error) {
+      console.error('TwilioGateway: emitVoicemailDetectedFromConversationToCrm failed', error);
+    }
+  }
+
+  private normalizeForVoicemailMatch(text: string): string {
+    return text
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/\p{M}/gu, '');
   }
 
   private formatTranscriptFromSegments(
@@ -203,9 +316,11 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
     if (!config.enabled || config.patterns.length === 0) return false;
     const normalizedRole = role.trim().toLowerCase();
     if (config.detectInRoles.size > 0 && !config.detectInRoles.has(normalizedRole)) return false;
-    const normalizedContent = content.trim().toLowerCase();
+    const normalizedContent = this.normalizeForVoicemailMatch(content);
     if (normalizedContent.length === 0) return false;
-    return config.patterns.some((pattern) => normalizedContent.includes(pattern));
+    return config.patterns.some((pattern) =>
+      normalizedContent.includes(this.normalizeForVoicemailMatch(pattern)),
+    );
   }
 
   private async handleTwilioConnection(
@@ -213,6 +328,11 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
     connectionTimeout: NodeJS.Timeout,
   ): Promise<void> {
     try {
+      let settleStreamMetadata: (() => void) | undefined;
+      const streamMetadataPromise = new Promise<void>((resolve) => {
+        settleStreamMetadata = resolve;
+      });
+
       const callContext: {
         customer_name?: string;
         allowInterrupt?: boolean;
@@ -220,30 +340,47 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
         customer_id?: string;
         callSid?: string;
         lastAssistantText?: string;
-        pendingCallCompleted?: Readonly<{ flowId: string; userId: string; customer_id?: string }> | null;
+        pendingCallCompleted?: Readonly<{
+          flowId: string;
+          userId: string;
+          customer_id?: string;
+          contactNameFromCall?: string;
+        }> | null;
         shouldHangupAfterAgentAudioDone?: boolean;
         isHangingUp?: boolean;
         transcriptSegments: Array<{ role: string; content: string }>;
         transcriptSentToCrm: boolean;
         voicemailDetected: boolean;
+        streamMetadataPromise: Promise<void>;
       } = {
         transcriptSegments: [],
         transcriptSentToCrm: false,
         voicemailDetected: false,
+        streamMetadataPromise,
       };
 
       // Per-connection function map:
       // - Deepgram can request tool calls at any time
       // - We delay emitting `call.completed_successfully` until the conversation is actually finished
       const functionMap = createFunctionMap({
+        emitRequestConfirmarCapacitacion: async (input: Readonly<{ flowId: string; userId: string }>) => {
+          await this.emitScheduleAppointmentConfirmarToCrm({
+            ...input,
+            customer_id: callContext.customer_id ?? input.userId,
+            contactNameFromCall: callContext.customer_name,
+          });
+        },
         emitCallCompletedSuccessfully: async (input: Readonly<{ flowId: string; userId: string }>) => {
           callContext.pendingCallCompleted = {
             ...input,
-            // The monolith expects `customer_id` from the Twilio start params.
-            // If it's missing, fall back to the same value we have as `userId`.
             customer_id: callContext.customer_id ?? input.userId,
+            contactNameFromCall: callContext.customer_name,
           };
         },
+        getScheduleContext: () => ({
+          flowId: callContext.flowId,
+          userId: callContext.customer_id,
+        }),
       });
 
       // Native ws connection to Deepgram (no SDK).
@@ -347,16 +484,21 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
             if (start?.callSid != null) {
               callContext.callSid = String(start.callSid).trim();
             }
-            const params = start?.customParameters ?? {};
-            if (params.customer_name != null) {
-              callContext.customer_name = String(params.customer_name).trim();
+            const params = (start?.customParameters ?? {}) as Record<string, string | undefined>;
+            const name = pickTwilioStreamStringParam(params, ['customer_name', 'customerName']);
+            if (name != null) {
+              callContext.customer_name = name;
             }
-            if (params.flowId != null) {
-              callContext.flowId = String(params.flowId).trim();
+            const flow = pickTwilioStreamStringParam(params, ['flowId', 'flow_id', 'FlowId']);
+            if (flow != null) {
+              callContext.flowId = flow;
             }
-            if (params.customer_id != null) {
-              callContext.customer_id = String(params.customer_id).trim();
+            const user = pickTwilioStreamStringParam(params, ['customer_id', 'userId', 'user_id']);
+            if (user != null) {
+              callContext.customer_id = user;
             }
+            settleStreamMetadata?.();
+            settleStreamMetadata = undefined;
           }
 
           const messageObj = { type: 'utf8', utf8Data: raw };
@@ -419,6 +561,11 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
           callContext.voicemailDetected = true;
           callContext.isHangingUp = true;
           console.log('📴 Voicemail detected from conversation text. Closing call to save credits.');
+          await this.emitVoicemailDetectedFromConversationToCrm({
+            flowId: callContext.flowId,
+            userId: callContext.customer_id,
+            callSid: callContext.callSid,
+          });
           await this.emitCallTranscriptIfNeeded(callContext);
           if (this.voicemailDetectionConfig.closeTwilioWsOnDetected && twilioWs.readyState === WebSocket.OPEN) {
             twilioWs.close();
@@ -462,11 +609,11 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
         callContext.isHangingUp = true;
         callContext.shouldHangupAfterAgentAudioDone = false;
 
-        if (callContext.pendingCallCompleted) {
-          await this.emitCallTranscriptIfNeeded(callContext);
-          await this.emitCallCompletedSuccessfullyToCrm(callContext.pendingCallCompleted);
-          callContext.pendingCallCompleted = null;
-        }
+        // if (callContext.pendingCallCompleted) {
+        //   await this.emitCallTranscriptIfNeeded(callContext);
+        //   await this.emitCallCompletedSuccessfullyToCrm(callContext.pendingCallCompleted);
+        //   callContext.pendingCallCompleted = null;
+        // }
 
         // At this point the agent finished speaking its final goodbye.
         // Close the Twilio media stream to ensure the actual call hangs up.
@@ -503,6 +650,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
       shouldHangupAfterAgentAudioDone?: boolean;
       transcriptSegments: Array<{ role: string; content: string }>;
       transcriptSentToCrm: boolean;
+      streamMetadataPromise?: Promise<void>;
     },
     functionMap: ReturnType<typeof createFunctionMap>,
   ): Promise<void> {
@@ -524,11 +672,27 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
 
         let result: any;
         if (funcName === 'scheduleAppointment') {
+          if (callContext.streamMetadataPromise != null) {
+            await Promise.race([
+              callContext.streamMetadataPromise,
+              new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+            ]);
+          }
           const scheduleArgs = arguments_ as ScheduleAppointmentParams;
+          const rawFlowId = scheduleArgs.flowId;
+          const rawUserId = scheduleArgs.userId;
+          const flowIdFromTool =
+            typeof rawFlowId === 'string' && rawFlowId.trim().length > 0
+              ? rawFlowId.trim()
+              : undefined;
+          const userIdFromTool =
+            typeof rawUserId === 'string' && rawUserId.trim().length > 0
+              ? rawUserId.trim()
+              : undefined;
           arguments_ = {
             ...scheduleArgs,
-            flowId: scheduleArgs.flowId ?? callContext.flowId,
-            userId: scheduleArgs.userId ?? callContext.customer_id,
+            flowId: flowIdFromTool ?? callContext.flowId,
+            userId: userIdFromTool ?? callContext.customer_id,
           };
         }
 

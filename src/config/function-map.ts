@@ -21,9 +21,25 @@ export type EmitCallCompletedSuccessfully = (input: Readonly<{
   userId: string;
 }>) => Promise<void>;
 
+/** Fired when the agent calls `scheduleAppointment`; triggers `send.confirmar_capacitacion` in the monolith immediately. */
+export type EmitRequestConfirmarCapacitacion = (input: Readonly<{
+  flowId: string;
+  userId: string;
+}>) => Promise<void>;
+
 export type CreateFunctionMapDeps = Readonly<{
   emitCallCompletedSuccessfully: EmitCallCompletedSuccessfully;
+  emitRequestConfirmarCapacitacion: EmitRequestConfirmarCapacitacion;
+  /** Live Twilio stream context (flowId, user) when the model omits them or the call races `start`. */
+  getScheduleContext?: () => Readonly<{ flowId?: string; userId?: string }>;
 }>;
+
+function coalesceTrimmedId(primary: string | undefined, fallback: string | undefined): string {
+  const a = typeof primary === 'string' ? primary.trim() : '';
+  if (a.length > 0) return a;
+  const b = typeof fallback === 'string' ? fallback.trim() : '';
+  return b;
+}
 
 export function createFunctionMap(deps: CreateFunctionMapDeps): FunctionMap {
   return {
@@ -40,18 +56,18 @@ export function createFunctionMap(deps: CreateFunctionMapDeps): FunctionMap {
     },
 
     async scheduleAppointment(args: ScheduleAppointmentParams) {
-
       console.log('[scheduleAppointment] called with params:', args);
-      const flowId = args?.flowId ?? '69bb06bfb2cdd000b18c4f72';
-      const userId = args?.userId ?? '67f47ec83ed9f93528d3fe61';
-      if (args?.userId && args?.flowId) {
-        await deps.emitCallCompletedSuccessfully({
-          userId,
-          flowId,
-        });
+      const ctx = deps.getScheduleContext?.() ?? {};
+      const flowId = coalesceTrimmedId(args?.flowId, ctx.flowId);
+      const userId = coalesceTrimmedId(args?.userId, ctx.userId);
+      if (flowId.length > 0 && userId.length > 0) {
+        await deps.emitRequestConfirmarCapacitacion({ userId, flowId });
+      } else {
+        console.warn(
+          '[scheduleAppointment] skipping CRM signals: missing flowId or userId (check Twilio <Parameter> names: flowId or flow_id; customer_id or userId)',
+          { flowId, userId, args, ctx },
+        );
       }
-
-      // The agent can use this as “tool result”.
       return { success: true, message: 'Cita agendada para la capacitación.' };
     },
   };
@@ -60,7 +76,10 @@ export function createFunctionMap(deps: CreateFunctionMapDeps): FunctionMap {
 // Default map (no-op emitter). Used by any legacy/unused websocket handler code.
 export const FUNCTION_MAP: FunctionMap = createFunctionMap({
   emitCallCompletedSuccessfully: async () => {
-    
     // intentionally empty
   },
+  emitRequestConfirmarCapacitacion: async () => {
+    // intentionally empty
+  },
+  getScheduleContext: () => ({}),
 });

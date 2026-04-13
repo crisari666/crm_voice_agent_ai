@@ -38,19 +38,24 @@ export class CallService {
     }
 
     try {
-      const statusBaseUrl = this.configService.get<string>('TWILIO_STATUS_CALLBACK_URL');
-      const amdStatusUrl =
-        this.configService.get<string>('TWILIO_AMD_STATUS_CALLBACK_URL') ??
-        (statusBaseUrl != null && statusBaseUrl.length > 0
-          ? `${statusBaseUrl.replace(/\/$/, '')}/amd-status`
-          : undefined);
       const flowId = typeof additionalParams.flowId === 'string' ? additionalParams.flowId.trim() : '';
       const userId = typeof additionalParams.customer_id === 'string' ? additionalParams.customer_id.trim() : '';
-      const amdStatusCallbackUrl = this.buildAmdStatusCallbackUrl({
-        baseUrl: amdStatusUrl,
-        flowId,
-        userId,
-      });
+
+      // Twilio Async AMD (`machineDetection` + `/amd-status`) is intentionally not used here.
+      // Voicemail / contestador is detected from live conversation text in `TwilioGateway` (STT patterns)
+      // and the same CRM event `call.voicemail_detected` is emitted from there.
+      //
+      // const statusBaseUrl = this.configService.get<string>('TWILIO_STATUS_CALLBACK_URL');
+      // const amdStatusUrl =
+      //   this.configService.get<string>('TWILIO_AMD_STATUS_CALLBACK_URL') ??
+      //   (statusBaseUrl != null && statusBaseUrl.length > 0
+      //     ? `${statusBaseUrl.replace(/\/$/, '')}/amd-status`
+      //     : undefined);
+      // const amdStatusCallbackUrl = this.buildAmdStatusCallbackUrl({
+      //   baseUrl: amdStatusUrl,
+      //   flowId,
+      //   userId,
+      // });
 
       const statusCallbackUrl = this.buildStatusCallbackUrl({
         baseUrl: this.configService.get<string>('TWILIO_STATUS_CALLBACK_URL'),
@@ -72,14 +77,14 @@ export class CallService {
         from: twilioPhoneNumber,
         url: twimlUrl,
         method: 'POST',
-        ...(amdStatusCallbackUrl != null && amdStatusCallbackUrl.length > 0
-          ? {
-              machineDetection: 'Enable',
-              asyncAmd: 'true',
-              asyncAmdStatusCallback: amdStatusCallbackUrl,
-              asyncAmdStatusCallbackMethod: 'POST' as const,
-            }
-          : {}),
+        // ...(amdStatusCallbackUrl != null && amdStatusCallbackUrl.length > 0
+        //   ? {
+        //       machineDetection: 'Enable',
+        //       asyncAmd: 'true',
+        //       asyncAmdStatusCallback: amdStatusCallbackUrl,
+        //       asyncAmdStatusCallbackMethod: 'POST' as const,
+        //     }
+        //   : {}),
         ...(statusCallbackUrl != null && statusCallbackUrl.length > 0
           ? { statusCallback: statusCallbackUrl }
           : {}),
@@ -130,29 +135,30 @@ export class CallService {
     return `${base}?${qs.toString()}`;
   }
 
-  private buildAmdStatusCallbackUrl(input: {
-    readonly baseUrl?: string;
-    readonly flowId?: string;
-    readonly userId?: string;
-  }): string | undefined {
-    const baseUrl = input.baseUrl?.trim();
-    if (baseUrl == null || baseUrl.length === 0) {
-      return undefined;
-    }
-    const flowId = input.flowId?.trim() ?? '';
-    const userId = input.userId?.trim() ?? '';
-    if (flowId.length === 0 && userId.length === 0) {
-      return baseUrl;
-    }
-    const url = new URL(baseUrl);
-    if (flowId.length > 0) {
-      url.searchParams.set('flowId', flowId);
-    }
-    if (userId.length > 0) {
-      url.searchParams.set('userId', userId);
-    }
-    return url.toString();
-  }
+  // Kept for reference if Twilio AMD is re-enabled alongside gateway transcript detection.
+  // private buildAmdStatusCallbackUrl(input: {
+  //   readonly baseUrl?: string;
+  //   readonly flowId?: string;
+  //   readonly userId?: string;
+  // }): string | undefined {
+  //   const baseUrl = input.baseUrl?.trim();
+  //   if (baseUrl == null || baseUrl.length === 0) {
+  //     return undefined;
+  //   }
+  //   const flowId = input.flowId?.trim() ?? '';
+  //   const userId = input.userId?.trim() ?? '';
+  //   if (flowId.length === 0 && userId.length === 0) {
+  //     return baseUrl;
+  //   }
+  //   const url = new URL(baseUrl);
+  //   if (flowId.length > 0) {
+  //     url.searchParams.set('flowId', flowId);
+  //   }
+  //   if (userId.length > 0) {
+  //     url.searchParams.set('userId', userId);
+  //   }
+  //   return url.toString();
+  // }
 
   private buildStatusCallbackUrl(input: {
     readonly baseUrl?: string;
