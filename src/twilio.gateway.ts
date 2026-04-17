@@ -336,7 +336,6 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
 
       const callContext: {
         customer_name?: string;
-        allowInterrupt?: boolean;
         flowId?: string;
         customer_id?: string;
         callSid?: string;
@@ -397,12 +396,15 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
       deepgramConnection.on('open', () => {
         clearTimeout(connectionTimeout);
         // Clone config per-call to avoid leaking previous caller context.
-        const connectionAgentConfig = JSON.parse(
-          JSON.stringify(this.agentConfigTemplate),
-        ) as Record<string, unknown>;
+        const connectionAgentConfig = JSON.parse(JSON.stringify(this.agentConfigTemplate));
 
         // Customize greeting using the customer name received in `start` event.
         const agent = (connectionAgentConfig['agent'] as any) ?? {};
+
+        if (agent.listen?.provider) {
+          agent.listen.provider.eot_threshold = 0.5; // Reduce from 0.7
+          agent.listen.provider.eager_eot_threshold = 0.3;
+        }
         const greetingTemplate = String(agent.greeting ?? '');
         agent.greeting = greetingTemplate.replace('CUSTOMER_NAME', callContext.customer_name ?? '');
         connectionAgentConfig['agent'] = agent;
@@ -537,7 +539,6 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
     streamSid: string | null,
     callContext: {
       customer_name?: string;
-      allowInterrupt?: boolean;
       flowId?: string;
       customer_id?: string;
       callSid?: string;
@@ -581,7 +582,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
 
     if (message.type === 'UserStartedSpeaking') {
       console.log({ callContext, streamSid });
-      if (callContext.allowInterrupt && streamSid) {
+      if (streamSid) {
         twilioWs.send(JSON.stringify({ event: 'clear', streamSid }));
       }
     }
@@ -589,11 +590,6 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
     if (message.type === 'ConversationText' && message.role === 'assistant') {
       const content: string = message.content ?? '';
       callContext.lastAssistantText = content;
-      if (content.includes('Te explico rápidamente')) {
-        callContext.allowInterrupt = true;
-      } else {
-
-      }
     }
 
     if (message.type === 'AgentAudioDone') {
@@ -644,7 +640,6 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
     deepgramConnection: WebSocket,
     callContext: {
       customer_name?: string;
-      allowInterrupt?: boolean;
       flowId?: string;
       customer_id?: string;
       callSid?: string;
