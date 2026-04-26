@@ -195,6 +195,11 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
     await lastValueFrom(this.crmBackQueueClient.emit('voice_agent_ms_event', event));
   }
 
+  private isMongoObjectIdHex24(value: string | undefined): boolean {
+    const v = value?.trim() ?? '';
+    return v.length === 24 && /^[a-fA-F0-9]{24}$/.test(v);
+  }
+
   /**
    * Frees the Twilio caller-ID pool row when the media stream ends (hangup, error, timeout).
    * Idempotent with `call.completed_successfully` (monolith release is per flowId).
@@ -685,10 +690,17 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
             typeof rawUserId === 'string' && rawUserId.trim().length > 0
               ? rawUserId.trim()
               : undefined;
+          const customerIdFromStream =
+            typeof callContext.customer_id === 'string' ? callContext.customer_id.trim() : '';
+          const resolvedScheduleUserId = this.isMongoObjectIdHex24(userIdFromTool)
+            ? userIdFromTool
+            : this.isMongoObjectIdHex24(customerIdFromStream)
+              ? customerIdFromStream
+              : userIdFromTool ?? callContext.customer_id;
           arguments_ = {
             ...scheduleArgs,
             flowId: flowIdFromTool ?? callContext.flowId,
-            userId: userIdFromTool ?? callContext.customer_id,
+            userId: resolvedScheduleUserId,
           };
         }
 

@@ -41,6 +41,27 @@ function coalesceTrimmedId(primary: string | undefined, fallback: string | undef
   return b;
 }
 
+/** Mongo ObjectId string from this stack is always 24 hex chars (avoids LLM passing a person name as userId). */
+function isMongoObjectIdHex24(value: string | undefined): boolean {
+  const v = typeof value === 'string' ? value.trim() : '';
+  return v.length === 24 && /^[a-fA-F0-9]{24}$/.test(v);
+}
+
+function pickScheduleUserIdForCrm(
+  argsUserId: string | undefined,
+  ctxUserId: string | undefined,
+): string {
+  const fromArgs = typeof argsUserId === 'string' ? argsUserId.trim() : '';
+  const fromCtx = typeof ctxUserId === 'string' ? ctxUserId.trim() : '';
+  if (isMongoObjectIdHex24(fromArgs)) {
+    return fromArgs;
+  }
+  if (isMongoObjectIdHex24(fromCtx)) {
+    return fromCtx;
+  }
+  return coalesceTrimmedId(argsUserId, ctxUserId);
+}
+
 export function createFunctionMap(deps: CreateFunctionMapDeps): FunctionMap {
   return {
     getContactName(args: GetContactNameParams) {
@@ -59,7 +80,7 @@ export function createFunctionMap(deps: CreateFunctionMapDeps): FunctionMap {
       console.log('[scheduleAppointment] called with params:', args);
       const ctx = deps.getScheduleContext?.() ?? {};
       const flowId = coalesceTrimmedId(args?.flowId, ctx.flowId);
-      const userId = coalesceTrimmedId(args?.userId, ctx.userId);
+      const userId = pickScheduleUserIdForCrm(args?.userId, ctx.userId);
       if (flowId.length > 0 && userId.length > 0) {
         await deps.emitRequestConfirmarCapacitacion({ userId, flowId });
       } else {
