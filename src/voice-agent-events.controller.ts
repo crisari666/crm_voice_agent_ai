@@ -42,17 +42,24 @@ export class VoiceAgentEventsController {
       const websocketUrl = payload.websocketUrl != null ? String(payload.websocketUrl) : '';
       const toNumber = payload.toNumber != null ? String(payload.toNumber) : '';
       const customerName = payload.customer_name != null ? String(payload.customer_name) : '';
-      const userId = payload.userId != null ? String(payload.userId) : '';
+      const leadCandidateId =
+        payload.leadCandidateId != null ? String(payload.leadCandidateId).trim() : '';
       const flowId = payload.flowId != null ? String(payload.flowId) : '';
       const fromNumber =
         payload.fromNumber != null ? String(payload.fromNumber) : '';
+      if (leadCandidateId.length === 0) {
+        console.error('VoiceAgentEventsController: missing leadCandidateId in call.trigger_request', {
+          flowId,
+        });
+        return;
+      }
 
       const callParams: CallInitiateParams = {
         websocketUrl,
         toNumber,
         fromNumber: fromNumber.length > 0 ? fromNumber : undefined,
         customer_name: customerName,
-        customer_id: userId,
+        customer_id: leadCandidateId,
         flowId,
       };
 
@@ -67,7 +74,7 @@ export class VoiceAgentEventsController {
             payload: {
               action: 'call.init_failed',
               flowId,
-              userId,
+              userId: leadCandidateId,
               reason: message,
             },
           } as CrmBackEventPayload),
