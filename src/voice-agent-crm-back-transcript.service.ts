@@ -16,8 +16,7 @@ export type CallTranscriptSegment = {
 
 export type EmitCallTranscriptCompleteInput = Readonly<{
   flowId: string;
-  userId: string;
-  customer_id?: string;
+  candidateId: string;
   callSid?: string;
   /** Full call transcript (plain text), typically built from `segments`. */
   transcript: string;
@@ -43,8 +42,7 @@ export class VoiceAgentCrmBackTranscriptService {
       payload: {
         action: 'call.transcript_complete',
         flowId: input.flowId,
-        userId: input.userId,
-        customer_id: input.customer_id ?? input.userId,
+        candidateId: input.candidateId,
         callSid: input.callSid,
         transcript: input.transcript,
         segments: input.segments,
@@ -54,7 +52,7 @@ export class VoiceAgentCrmBackTranscriptService {
     console.info(
       '🔔 Emitting call.transcript_complete to CRM Back:',
       JSON.stringify(
-        { flowId: input.flowId, userId: input.userId, callSid: input.callSid },
+        { flowId: input.flowId, candidateId: input.candidateId, callSid: input.callSid },
         null,
         2,
       ),

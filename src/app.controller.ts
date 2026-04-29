@@ -118,26 +118,30 @@ export class AppController {
   public handleStatusChange2(
     @Body() body: Record<string, unknown>,
     @Query('flowId') queryFlowId: string | undefined,
-    @Query('userId') queryUserId: string | undefined,
+    @Query('candidateId') queryCandidateId: string | undefined,
+    @Query('userId') queryUserIdLegacy: string | undefined,
     @Res() res: Response,
   ): void {
-    console.log('🔄 Status second change received:', body);
+    console.log('🔄 Status second change received:', body, queryFlowId, queryCandidateId);
     const callStatus = this.getOptionalNonEmptyString(body.CallStatus)?.toLowerCase();
     const flowId =
       this.getOptionalNonEmptyString(body.flowId) ?? this.getOptionalNonEmptyString(queryFlowId);
-    const userId =
-      this.getOptionalNonEmptyString(body.userId) ?? this.getOptionalNonEmptyString(queryUserId);
+    const candidateId =
+      this.getOptionalNonEmptyString(body.candidateId) ??
+      this.getOptionalNonEmptyString(queryCandidateId) ??
+      this.getOptionalNonEmptyString(body.userId) ??
+      this.getOptionalNonEmptyString(queryUserIdLegacy);
     if (callStatus != null && TERMINAL_CALL_STATUSES.has(callStatus)) {
-      if (flowId != null || userId != null) {
+      if (flowId != null || candidateId != null) {
         void this.emitVoiceConnectionClosedToCrm({
           flowId,
-          userId,
+          candidateId,
           callStatus,
           callSid: this.getOptionalNonEmptyString(body.CallSid),
         });
       } else {
         console.warn(
-          'Skipping call.voice_connection_closed event. Missing flowId and userId in /status-change-2 payload.',
+          'Skipping call.voice_connection_closed event. Missing flowId and candidateId in /status-change-2 payload.',
         );
       }
     } else {
@@ -153,7 +157,8 @@ export class AppController {
   public handleAmdStatus(
     @Body() body: Record<string, unknown>,
     @Query('flowId') queryFlowId: string | undefined,
-    @Query('userId') queryUserId: string | undefined,
+    @Query('candidateId') queryCandidateId: string | undefined,
+    @Query('userId') queryUserIdLegacy: string | undefined,
     @Res() res: Response,
   ): void {
     const { AnsweredBy, CallSid } = body ?? {};
@@ -163,11 +168,15 @@ export class AppController {
     if (typeof CallSid === 'string' && CallSid.length > 0 && ANSWERED_BY_SHOULD_HANGUP.has(String(AnsweredBy))) {
       console.log(`🤖 Voicemail/machine/fax detected for call ${CallSid} (${AnsweredBy}). Hanging up.`);
       const flowId = this.getOptionalNonEmptyString(body.flowId) ?? this.getOptionalNonEmptyString(queryFlowId);
-      const userId = this.getOptionalNonEmptyString(body.userId) ?? this.getOptionalNonEmptyString(queryUserId);
-      if (flowId != null || userId != null) {
+      const candidateId =
+        this.getOptionalNonEmptyString(body.candidateId) ??
+        this.getOptionalNonEmptyString(queryCandidateId) ??
+        this.getOptionalNonEmptyString(body.userId) ??
+        this.getOptionalNonEmptyString(queryUserIdLegacy);
+      if (flowId != null || candidateId != null) {
         void this.emitVoicemailDetectedToCrmBack({
           flowId,
-          userId,
+          candidateId,
           answeredBy: String(AnsweredBy),
           callSid: CallSid,
         });
@@ -215,7 +224,7 @@ export class AppController {
 
   private async emitVoicemailDetectedToCrmBack(input: {
     readonly flowId?: string | null;
-    readonly userId?: string | null;
+    readonly candidateId?: string | null;
     readonly answeredBy: string;
     readonly callSid: string;
   }): Promise<void> {
@@ -224,7 +233,7 @@ export class AppController {
       payload: {
         action: 'call.voicemail_detected',
         ...(input.flowId != null ? { flowId: input.flowId } : {}),
-        ...(input.userId != null ? { userId: input.userId } : {}),
+        ...(input.candidateId != null ? { candidateId: input.candidateId } : {}),
         answeredBy: input.answeredBy,
         callSid: input.callSid,
       },
@@ -238,7 +247,7 @@ export class AppController {
 
   private async emitVoiceConnectionClosedToCrm(input: {
     readonly flowId?: string | null;
-    readonly userId?: string | null;
+    readonly candidateId?: string | null;
     readonly callStatus: string;
     readonly callSid?: string | null;
   }): Promise<void> {
@@ -247,7 +256,7 @@ export class AppController {
       payload: {
         action: 'call.voice_connection_closed',
         ...(input.flowId != null ? { flowId: input.flowId } : {}),
-        ...(input.userId != null ? { userId: input.userId } : {}),
+        ...(input.candidateId != null ? { candidateId: input.candidateId } : {}),
         callStatus: input.callStatus,
         ...(input.callSid != null ? { callSid: input.callSid } : {}),
       },

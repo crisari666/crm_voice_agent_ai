@@ -14,24 +14,25 @@ export interface DisabledUserParams {
 export interface ScheduleAppointmentParams {
   userId: string;
   flowId?: string;
+  candidateId?: string;
 }
 
 export type EmitCallCompletedSuccessfully = (input: Readonly<{
   flowId: string;
-  userId: string;
+  candidateId: string;
 }>) => Promise<void>;
 
 /** Fired when the agent calls `scheduleAppointment`; triggers `send.confirmar_capacitacion` in the monolith immediately. */
 export type EmitRequestConfirmarCapacitacion = (input: Readonly<{
   flowId: string;
-  userId: string;
+  candidateId: string;
 }>) => Promise<void>;
 
 export type CreateFunctionMapDeps = Readonly<{
   emitCallCompletedSuccessfully: EmitCallCompletedSuccessfully;
   emitRequestConfirmarCapacitacion: EmitRequestConfirmarCapacitacion;
-  /** Live Twilio stream context (flowId, user) when the model omits them or the call races `start`. */
-  getScheduleContext?: () => Readonly<{ flowId?: string; userId?: string }>;
+  /** Live Twilio stream context when the model omits ids or the call races `start`. */
+  getScheduleContext?: () => Readonly<{ flowId?: string; candidateId?: string }>;
 }>;
 
 function coalesceTrimmedId(primary: string | undefined, fallback: string | undefined): string {
@@ -41,25 +42,31 @@ function coalesceTrimmedId(primary: string | undefined, fallback: string | undef
   return b;
 }
 
-/** Mongo ObjectId string from this stack is always 24 hex chars (avoids LLM passing a person name as userId). */
+/** Mongo ObjectId string from this stack is always 24 hex chars (avoids LLM passing a display name as id). */
 function isMongoObjectIdHex24(value: string | undefined): boolean {
   const v = typeof value === 'string' ? value.trim() : '';
   return v.length === 24 && /^[a-fA-F0-9]{24}$/.test(v);
 }
 
-function pickScheduleUserIdForCrm(
+function pickScheduleCandidateIdForCrm(
+  argsCandidateId: string | undefined,
   argsUserId: string | undefined,
-  ctxUserId: string | undefined,
+  ctxCandidateId: string | undefined,
 ): string {
-  const fromArgs = typeof argsUserId === 'string' ? argsUserId.trim() : '';
-  const fromCtx = typeof ctxUserId === 'string' ? ctxUserId.trim() : '';
-  if (isMongoObjectIdHex24(fromArgs)) {
-    return fromArgs;
+  const fromArgsCandidate =
+    typeof argsCandidateId === 'string' ? argsCandidateId.trim() : '';
+  if (isMongoObjectIdHex24(fromArgsCandidate)) {
+    return fromArgsCandidate;
   }
+  const fromArgsUser = typeof argsUserId === 'string' ? argsUserId.trim() : '';
+  if (isMongoObjectIdHex24(fromArgsUser)) {
+    return fromArgsUser;
+  }
+  const fromCtx = typeof ctxCandidateId === 'string' ? ctxCandidateId.trim() : '';
   if (isMongoObjectIdHex24(fromCtx)) {
     return fromCtx;
   }
-  return coalesceTrimmedId(argsUserId, ctxUserId);
+  return coalesceTrimmedId(argsCandidateId, coalesceTrimmedId(argsUserId, ctxCandidateId));
 }
 
 export function createFunctionMap(deps: CreateFunctionMapDeps): FunctionMap {
@@ -80,13 +87,17 @@ export function createFunctionMap(deps: CreateFunctionMapDeps): FunctionMap {
       console.log('[scheduleAppointment] called with params:', args);
       const ctx = deps.getScheduleContext?.() ?? {};
       const flowId = coalesceTrimmedId(args?.flowId, ctx.flowId);
-      const userId = pickScheduleUserIdForCrm(args?.userId, ctx.userId);
-      if (flowId.length > 0 && userId.length > 0) {
-        await deps.emitRequestConfirmarCapacitacion({ userId, flowId });
+      const candidateId = pickScheduleCandidateIdForCrm(
+        args?.candidateId,
+        args?.userId,
+        ctx.candidateId,
+      );
+      if (flowId.length > 0 && candidateId.length > 0) {
+        await deps.emitRequestConfirmarCapacitacion({ candidateId, flowId });
       } else {
         console.warn(
-          '[scheduleAppointment] skipping CRM signals: missing flowId or userId (check Twilio <Parameter> names: flowId or flow_id; customer_id or userId)',
-          { flowId, userId, args, ctx },
+          '[scheduleAppointment] skipping CRM signals: missing flowId or candidateId (Twilio <Parameter>: flowId; customer_id / candidateId)',
+          { flowId, candidateId, args, ctx },
         );
       }
       return { success: true, message: 'Cita agendada para la capacitación.' };

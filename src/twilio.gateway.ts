@@ -122,14 +122,13 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
   private async emitCallCompletedSuccessfullyToCrm(
     input: Readonly<{
       flowId: string;
-      userId: string;
-      customer_id?: string;
+      candidateId: string;
       contactNameFromCall?: string;
     }>,
   ): Promise<void> {
-    if (input.flowId.trim().length === 0 || input.userId.trim().length === 0) {
+    if (input.flowId.trim().length === 0 || input.candidateId.trim().length === 0) {
       console.warn(
-        'TwilioGateway: skipping call.completed_successfully emit due to missing flowId or userId',
+        'TwilioGateway: skipping call.completed_successfully emit due to missing flowId or candidateId',
         input,
       );
       return;
@@ -145,8 +144,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
       payload: {
         action: 'call.completed_successfully',
         flowId: input.flowId,
-        userId: input.userId,
-        customer_id: input.customer_id,
+        candidateId: input.candidateId,
         ...(trimmedContactName != null && trimmedContactName.length > 0
           ? { contactNameFromCall: trimmedContactName }
           : {}),
@@ -163,14 +161,13 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
   private async emitScheduleAppointmentConfirmarToCrm(
     input: Readonly<{
       flowId: string;
-      userId: string;
-      customer_id?: string;
+      candidateId: string;
       contactNameFromCall?: string;
     }>,
   ): Promise<void> {
-    if (input.flowId.trim().length === 0 || input.userId.trim().length === 0) {
+    if (input.flowId.trim().length === 0 || input.candidateId.trim().length === 0) {
       console.warn(
-        'TwilioGateway: skipping call.schedule_appointment_completed emit due to missing flowId or userId',
+        'TwilioGateway: skipping call.schedule_appointment_completed emit due to missing flowId or candidateId',
         input,
       );
       return;
@@ -181,8 +178,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
       payload: {
         action: 'call.schedule_appointment_completed',
         flowId: input.flowId,
-        userId: input.userId,
-        customer_id: input.customer_id,
+        candidateId: input.candidateId,
         ...(trimmedContactName != null && trimmedContactName.length > 0
           ? { contactNameFromCall: trimmedContactName }
           : {}),
@@ -228,14 +224,14 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
    */
   private async emitVoicemailDetectedFromConversationToCrm(input: Readonly<{
     flowId?: string;
-    userId?: string;
+    candidateId?: string;
     callSid?: string;
   }>): Promise<void> {
     const flowId = input.flowId?.trim() ?? '';
-    const userId = input.userId?.trim() ?? '';
-    if (flowId.length === 0 && userId.length === 0) {
+    const candidateId = input.candidateId?.trim() ?? '';
+    if (flowId.length === 0 && candidateId.length === 0) {
       console.warn(
-        'TwilioGateway: skipping call.voicemail_detected (need flowId or userId, like AMD callback)',
+        'TwilioGateway: skipping call.voicemail_detected (need flowId or candidateId, like AMD callback)',
         input,
       );
       return;
@@ -246,7 +242,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
       payload: {
         action: 'call.voicemail_detected',
         ...(flowId.length > 0 ? { flowId } : {}),
-        ...(userId.length > 0 ? { userId } : {}),
+        ...(candidateId.length > 0 ? { candidateId } : {}),
         answeredBy: VOICEMAIL_ANSWERED_BY_FROM_CONVERSATION,
         ...(callSid.length > 0 ? { callSid } : {}),
       },
@@ -285,16 +281,15 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
   }): Promise<void> {
     if (callContext.transcriptSentToCrm) return;
     const flowId = callContext.flowId;
-    const userId = callContext.customer_id;
-    if (!flowId || !userId) return;
+    const candidateId = callContext.customer_id;
+    if (!flowId || !candidateId) return;
 
     const segments = callContext.transcriptSegments;
     const transcript = this.formatTranscriptFromSegments(segments);
 
     await this.crmBackTranscriptService.emitCallTranscriptComplete({
       flowId,
-      userId,
-      customer_id: userId,
+      candidateId,
       callSid: callContext.callSid,
       transcript,
       segments,
@@ -347,8 +342,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
         lastAssistantText?: string;
         pendingCallCompleted?: Readonly<{
           flowId: string;
-          userId: string;
-          customer_id?: string;
+          candidateId: string;
           contactNameFromCall?: string;
         }> | null;
         shouldHangupAfterAgentAudioDone?: boolean;
@@ -368,23 +362,27 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
       // - Deepgram can request tool calls at any time
       // - We delay emitting `call.completed_successfully` until the conversation is actually finished
       const functionMap = createFunctionMap({
-        emitRequestConfirmarCapacitacion: async (input: Readonly<{ flowId: string; userId: string }>) => {
+        emitRequestConfirmarCapacitacion: async (
+          input: Readonly<{ flowId: string; candidateId: string }>,
+        ) => {
           await this.emitScheduleAppointmentConfirmarToCrm({
-            ...input,
-            customer_id: callContext.customer_id ?? input.userId,
+            flowId: input.flowId,
+            candidateId: callContext.customer_id ?? input.candidateId,
             contactNameFromCall: callContext.customer_name,
           });
         },
-        emitCallCompletedSuccessfully: async (input: Readonly<{ flowId: string; userId: string }>) => {
+        emitCallCompletedSuccessfully: async (
+          input: Readonly<{ flowId: string; candidateId: string }>,
+        ) => {
           callContext.pendingCallCompleted = {
-            ...input,
-            customer_id: callContext.customer_id ?? input.userId,
+            flowId: input.flowId,
+            candidateId: callContext.customer_id ?? input.candidateId,
             contactNameFromCall: callContext.customer_name,
           };
         },
         getScheduleContext: () => ({
           flowId: callContext.flowId,
-          userId: callContext.customer_id,
+          candidateId: callContext.customer_id,
         }),
       });
 
@@ -501,7 +499,13 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
             if (flow != null) {
               callContext.flowId = flow;
             }
-            const user = pickTwilioStreamStringParam(params, ['customer_id', 'userId', 'user_id']);
+            const user = pickTwilioStreamStringParam(params, [
+              'customer_id',
+              'candidateId',
+              'candidate_id',
+              'userId',
+              'user_id',
+            ]);
             if (user != null) {
               callContext.customer_id = user;
             }
@@ -548,7 +552,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
       customer_id?: string;
       callSid?: string;
       lastAssistantText?: string;
-      pendingCallCompleted?: Readonly<{ flowId: string; userId: string }> | null;
+      pendingCallCompleted?: Readonly<{ flowId: string; candidateId: string }> | null;
       shouldHangupAfterAgentAudioDone?: boolean;
       isHangingUp?: boolean;
       transcriptSegments: Array<{ role: string; content: string }>;
@@ -570,7 +574,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
           console.log('📴 Voicemail detected from conversation text. Closing call to save credits.');
           await this.emitVoicemailDetectedFromConversationToCrm({
             flowId: callContext.flowId,
-            userId: callContext.customer_id,
+            candidateId: callContext.customer_id,
             callSid: callContext.callSid,
           });
           await this.emitCallTranscriptIfNeeded(callContext);
@@ -692,15 +696,22 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
               : undefined;
           const customerIdFromStream =
             typeof callContext.customer_id === 'string' ? callContext.customer_id.trim() : '';
-          const resolvedScheduleUserId = this.isMongoObjectIdHex24(userIdFromTool)
-            ? userIdFromTool
-            : this.isMongoObjectIdHex24(customerIdFromStream)
-              ? customerIdFromStream
-              : userIdFromTool ?? callContext.customer_id;
+          const rawCandidateFromTool =
+            typeof scheduleArgs.candidateId === 'string' && scheduleArgs.candidateId.trim().length > 0
+              ? scheduleArgs.candidateId.trim()
+              : undefined;
+          const resolvedScheduleCandidateId = this.isMongoObjectIdHex24(rawCandidateFromTool)
+            ? rawCandidateFromTool
+            : this.isMongoObjectIdHex24(userIdFromTool)
+              ? userIdFromTool
+              : this.isMongoObjectIdHex24(customerIdFromStream)
+                ? customerIdFromStream
+                : rawCandidateFromTool ?? userIdFromTool ?? callContext.customer_id;
           arguments_ = {
             ...scheduleArgs,
             flowId: flowIdFromTool ?? callContext.flowId,
-            userId: resolvedScheduleUserId,
+            userId: resolvedScheduleCandidateId,
+            candidateId: resolvedScheduleCandidateId,
           };
         }
 

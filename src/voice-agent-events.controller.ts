@@ -42,13 +42,14 @@ export class VoiceAgentEventsController {
       const websocketUrl = payload.websocketUrl != null ? String(payload.websocketUrl) : '';
       const toNumber = payload.toNumber != null ? String(payload.toNumber) : '';
       const customerName = payload.customer_name != null ? String(payload.customer_name) : '';
-      const leadCandidateId =
-        payload.leadCandidateId != null ? String(payload.leadCandidateId).trim() : '';
+      const candidateIdRaw = payload.candidateId ?? payload.leadCandidateId;
+      const candidateId =
+        candidateIdRaw != null ? String(candidateIdRaw).trim() : '';
       const flowId = payload.flowId != null ? String(payload.flowId) : '';
       const fromNumber =
         payload.fromNumber != null ? String(payload.fromNumber) : '';
-      if (leadCandidateId.length === 0) {
-        console.error('VoiceAgentEventsController: missing leadCandidateId in call.trigger_request', {
+      if (candidateId.length === 0) {
+        console.error('VoiceAgentEventsController: missing candidateId in call.trigger_request', {
           flowId,
         });
         return;
@@ -59,7 +60,7 @@ export class VoiceAgentEventsController {
         toNumber,
         fromNumber: fromNumber.length > 0 ? fromNumber : undefined,
         customer_name: customerName,
-        customer_id: leadCandidateId,
+        customer_id: candidateId,
         flowId,
       };
 
@@ -74,7 +75,7 @@ export class VoiceAgentEventsController {
             payload: {
               action: 'call.init_failed',
               flowId,
-              userId: leadCandidateId,
+              candidateId,
               reason: message,
             },
           } as CrmBackEventPayload),

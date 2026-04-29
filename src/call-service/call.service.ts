@@ -60,7 +60,7 @@ export class CallService {
       const statusCallbackUrl = this.buildStatusCallbackUrl({
         baseUrl: this.configService.get<string>('TWILIO_STATUS_CALLBACK_URL'),
         flowId,
-        userId,
+        candidateId: userId,
       });
       const twimlUrl = this.buildTwimlRequestUrl(websocketUrl, additionalParams);
       if (!twimlUrl) {
@@ -163,7 +163,7 @@ export class CallService {
   private buildStatusCallbackUrl(input: {
     readonly baseUrl?: string;
     readonly flowId?: string;
-    readonly userId?: string;
+    readonly candidateId?: string;
   }): string | undefined {
     const baseUrl = input.baseUrl?.trim();
     if (baseUrl == null || baseUrl.length === 0) {
@@ -171,12 +171,12 @@ export class CallService {
     }
     const url = new URL(`${baseUrl.replace(/\/$/, '')}/status-change-2`);
     const flowId = input.flowId?.trim() ?? '';
-    const userId = input.userId?.trim() ?? '';
+    const candidateId = input.candidateId?.trim() ?? '';
     if (flowId.length > 0) {
       url.searchParams.set('flowId', flowId);
     }
-    if (userId.length > 0) {
-      url.searchParams.set('userId', userId);
+    if (candidateId.length > 0) {
+      url.searchParams.set('candidateId', candidateId);
     }
     return url.toString();
   }
