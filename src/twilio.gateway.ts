@@ -9,7 +9,11 @@ import { WebSocketServer as NativeWebSocketServer } from 'ws';
 import { ClientProxy } from '@nestjs/microservices';
 import { lastValueFrom } from 'rxjs';
 import { TwilioAudioProcessor } from './types/twilio-audio-processor';
-import { createFunctionMap, type ScheduleAppointmentParams } from './config/function-map';
+import {
+  createFunctionMap,
+  type DisabledUserParams,
+  type ScheduleAppointmentParams,
+} from './config/function-map';
 import { VoiceAgentCrmBackTranscriptService } from './voice-agent-crm-back-transcript.service';
 
 type CrmBackEventSourceType = 'ws_ms_events' | 'voice_agent_ms_events';
@@ -186,6 +190,43 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
     };
     console.info(
       'Emitting call.schedule_appointment_completed (confirmar_capacitacion) to CRM Back:',
+      JSON.stringify(event.payload, null, 2),
+    );
+    await lastValueFrom(this.crmBackQueueClient.emit('voice_agent_ms_event', event));
+  }
+
+  /**
+   * Emitted when the Deepgram agent invokes `disabledUser` so the monolith can append
+   * `call.user_declined_onboarding` to the onboarding flow event log.
+   */
+  private async emitUserDeclinedDuringCallToCrm(
+    input: Readonly<{
+      flowId: string;
+      candidateId: string;
+      customerIdFromStream?: string;
+    }>,
+  ): Promise<void> {
+    if (input.flowId.trim().length === 0 || input.candidateId.trim().length === 0) {
+      console.warn(
+        'TwilioGateway: skipping call.user_declined_onboarding emit due to missing flowId or candidateId',
+        input,
+      );
+      return;
+    }
+    const customerIdTrim = input.customerIdFromStream?.trim();
+    const event: CrmBackEventPayload = {
+      type: 'voice_agent_ms_events',
+      payload: {
+        action: 'call.user_declined_onboarding',
+        flowId: input.flowId,
+        candidateId: input.candidateId,
+        ...(customerIdTrim != null && customerIdTrim.length > 0
+          ? { customer_id: customerIdTrim }
+          : {}),
+      },
+    };
+    console.info(
+      'Emitting call.user_declined_onboarding to CRM Back:',
       JSON.stringify(event.payload, null, 2),
     );
     await lastValueFrom(this.crmBackQueueClient.emit('voice_agent_ms_event', event));
@@ -380,6 +421,13 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
             contactNameFromCall: callContext.customer_name,
           };
         },
+        emitUserDeclinedDuringCall: async (input: Readonly<{ flowId: string; candidateId: string }>) => {
+          await this.emitUserDeclinedDuringCallToCrm({
+            flowId: input.flowId,
+            candidateId: callContext.customer_id ?? input.candidateId,
+            customerIdFromStream: callContext.customer_id,
+          });
+        },
         getScheduleContext: () => ({
           flowId: callContext.flowId,
           candidateId: callContext.customer_id,
@@ -558,6 +606,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
       transcriptSegments: Array<{ role: string; content: string }>;
       transcriptSentToCrm: boolean;
       voicemailDetected: boolean;
+      streamMetadataPromise?: Promise<void>;
     },
     functionMap: ReturnType<typeof createFunctionMap>,
   ): Promise<void> {
@@ -712,6 +761,45 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
             flowId: flowIdFromTool ?? callContext.flowId,
             userId: resolvedScheduleCandidateId,
             candidateId: resolvedScheduleCandidateId,
+          };
+        }
+
+        if (funcName === 'disabledUser') {
+          if (callContext.streamMetadataPromise != null) {
+            await Promise.race([
+              callContext.streamMetadataPromise,
+              new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+            ]);
+          }
+          const disabledArgs = arguments_ as DisabledUserParams;
+          const rawFlowIdDisabled = disabledArgs.flowId;
+          const rawUserIdDisabled = disabledArgs.userId;
+          const flowIdFromToolDisabled =
+            typeof rawFlowIdDisabled === 'string' && rawFlowIdDisabled.trim().length > 0
+              ? rawFlowIdDisabled.trim()
+              : undefined;
+          const userIdFromToolDisabled =
+            typeof rawUserIdDisabled === 'string' && rawUserIdDisabled.trim().length > 0
+              ? rawUserIdDisabled.trim()
+              : undefined;
+          const customerIdFromStreamDisabled =
+            typeof callContext.customer_id === 'string' ? callContext.customer_id.trim() : '';
+          const rawCandidateFromToolDisabled =
+            typeof disabledArgs.candidateId === 'string' && disabledArgs.candidateId.trim().length > 0
+              ? disabledArgs.candidateId.trim()
+              : undefined;
+          const resolvedDisabledCandidateId = this.isMongoObjectIdHex24(rawCandidateFromToolDisabled)
+            ? rawCandidateFromToolDisabled
+            : this.isMongoObjectIdHex24(userIdFromToolDisabled)
+              ? userIdFromToolDisabled
+              : this.isMongoObjectIdHex24(customerIdFromStreamDisabled)
+                ? customerIdFromStreamDisabled
+                : rawCandidateFromToolDisabled ?? userIdFromToolDisabled ?? callContext.customer_id;
+          arguments_ = {
+            ...disabledArgs,
+            flowId: flowIdFromToolDisabled ?? callContext.flowId,
+            userId: resolvedDisabledCandidateId,
+            candidateId: resolvedDisabledCandidateId,
           };
         }
 

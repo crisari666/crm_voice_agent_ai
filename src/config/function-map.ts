@@ -5,9 +5,11 @@ export interface GetContactNameParams {
   customer_name?: string;
 }
 
-/** Params for disabledUser (from agent function call). */
+/** Params for disabledUser (from agent function call; gateway may inject flowId/candidateId from stream). */
 export interface DisabledUserParams {
   userId: string;
+  flowId?: string;
+  candidateId?: string;
 }
 
 /** Params for scheduleAppointment (from agent function call). */
@@ -28,9 +30,16 @@ export type EmitRequestConfirmarCapacitacion = (input: Readonly<{
   candidateId: string;
 }>) => Promise<void>;
 
+/** Fired when the agent calls `disabledUser` so the monolith can log `call.user_declined_onboarding`. */
+export type EmitUserDeclinedDuringCall = (input: Readonly<{
+  flowId: string;
+  candidateId: string;
+}>) => Promise<void>;
+
 export type CreateFunctionMapDeps = Readonly<{
   emitCallCompletedSuccessfully: EmitCallCompletedSuccessfully;
   emitRequestConfirmarCapacitacion: EmitRequestConfirmarCapacitacion;
+  emitUserDeclinedDuringCall: EmitUserDeclinedDuringCall;
   /** Live Twilio stream context when the model omits ids or the call races `start`. */
   getScheduleContext?: () => Readonly<{ flowId?: string; candidateId?: string }>;
 }>;
@@ -77,9 +86,23 @@ export function createFunctionMap(deps: CreateFunctionMapDeps): FunctionMap {
       return { contactName: name, CONTACT_NAME: name };
     },
 
-    disabledUser(args: DisabledUserParams) {
+    async disabledUser(args: DisabledUserParams) {
       console.log('[disabledUser] called with params:', args);
-      // TODO: call endpoint e.g. POST /api/users/:userId/disable
+      const ctx = deps.getScheduleContext?.() ?? {};
+      const flowId = coalesceTrimmedId(args?.flowId, ctx.flowId);
+      const candidateId = pickScheduleCandidateIdForCrm(
+        args?.candidateId,
+        args?.userId,
+        ctx.candidateId,
+      );
+      if (flowId.length > 0 && candidateId.length > 0) {
+        await deps.emitUserDeclinedDuringCall({ candidateId, flowId });
+      } else {
+        console.warn(
+          '[disabledUser] skipping CRM decline event: missing flowId or candidateId (Twilio <Parameter>: flowId; customer_id / candidateId)',
+          { flowId, candidateId, args, ctx },
+        );
+      }
       return { success: true, message: 'Usuario marcado como desinteresado.' };
     },
 
@@ -111,6 +134,9 @@ export const FUNCTION_MAP: FunctionMap = createFunctionMap({
     // intentionally empty
   },
   emitRequestConfirmarCapacitacion: async () => {
+    // intentionally empty
+  },
+  emitUserDeclinedDuringCall: async () => {
     // intentionally empty
   },
   getScheduleContext: () => ({}),
