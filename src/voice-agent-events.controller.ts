@@ -62,6 +62,12 @@ export class VoiceAgentEventsController {
         customer_name: customerName,
         customer_id: candidateId,
         flowId,
+        ...(payload.recruiting === true || flowId.startsWith('job-campaign:')
+          ? { recruiting: true }
+          : {}),
+        ...(typeof payload.voiceAgentPrompt === 'string'
+          ? { voiceAgentPrompt: payload.voiceAgentPrompt }
+          : {}),
       };
 
       try {

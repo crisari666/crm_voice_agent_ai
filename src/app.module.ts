@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { CallService } from './call-service/call.service';
+import { RecruitingCallContextStore } from './call-service/recruiting-call-context.store';
 import { TwilioGateway } from './twilio.gateway';
 import { ClientsModule, Transport } from '@nestjs/microservices';
 import { VoiceAgentEventsController } from './voice-agent-events.controller';
@@ -36,6 +37,12 @@ import { VoiceAgentCrmBackTranscriptService } from './voice-agent-crm-back-trans
     ]),
   ],
   controllers: [AppController, VoiceAgentEventsController],
-  providers: [AppService, TwilioGateway, CallService, VoiceAgentCrmBackTranscriptService],
+  providers: [
+    AppService,
+    TwilioGateway,
+    CallService,
+    RecruitingCallContextStore,
+    VoiceAgentCrmBackTranscriptService,
+  ],
 })
 export class AppModule {}

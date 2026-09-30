@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, InternalServerErrorException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Twilio } from 'twilio';
+import { RecruitingCallContextStore } from './recruiting-call-context.store';
 
 export type CallInitiateParams = {
   websocketUrl?: string;
@@ -9,6 +10,8 @@ export type CallInitiateParams = {
   customer_name?: string;
   customer_id?: string;
   is_dev?: boolean;
+  voiceAgentPrompt?: string;
+  recruiting?: boolean | string;
   [key: string]: unknown;
 };
 
@@ -16,7 +19,10 @@ export type CallInitiateParams = {
 export class CallService {
   private twilioClient?: Twilio;
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly recruitingCallContextStore: RecruitingCallContextStore,
+  ) {}
 
   async initiateCall(params: CallInitiateParams): Promise<string> {
     const { websocketUrl, fromNumber, toNumber, ...additionalParams } = params ?? {};
@@ -32,7 +38,7 @@ export class CallService {
       );
     }
 
-    console.log({ websocketUrl, additionalParams });
+    console.log({ websocketUrl, additionalParams: { ...additionalParams, voiceAgentPrompt: additionalParams.voiceAgentPrompt != null ? '[set]' : undefined } });
     if (!websocketUrl) {
       throw new BadRequestException('Error: websocketUrl parameter is required');
     }
@@ -40,29 +46,33 @@ export class CallService {
     try {
       const flowId = typeof additionalParams.flowId === 'string' ? additionalParams.flowId.trim() : '';
       const userId = typeof additionalParams.customer_id === 'string' ? additionalParams.customer_id.trim() : '';
-
-      // Twilio Async AMD (`machineDetection` + `/amd-status`) is intentionally not used here.
-      // Voicemail / contestador is detected from live conversation text in `TwilioGateway` (STT patterns)
-      // and the same CRM event `call.voicemail_detected` is emitted from there.
-      //
-      // const statusBaseUrl = this.configService.get<string>('TWILIO_STATUS_CALLBACK_URL');
-      // const amdStatusUrl =
-      //   this.configService.get<string>('TWILIO_AMD_STATUS_CALLBACK_URL') ??
-      //   (statusBaseUrl != null && statusBaseUrl.length > 0
-      //     ? `${statusBaseUrl.replace(/\/$/, '')}/amd-status`
-      //     : undefined);
-      // const amdStatusCallbackUrl = this.buildAmdStatusCallbackUrl({
-      //   baseUrl: amdStatusUrl,
-      //   flowId,
-      //   userId,
-      // });
-
+      const voiceAgentPrompt =
+        typeof additionalParams.voiceAgentPrompt === 'string'
+          ? additionalParams.voiceAgentPrompt
+          : '';
+      const recruitingFlag =
+        additionalParams.recruiting === true ||
+        additionalParams.recruiting === 'true' ||
+        flowId.startsWith('job-campaign:');
+      if (recruitingFlag && flowId.length > 0) {
+        this.recruitingCallContextStore.put({
+          flowId,
+          candidateId: userId,
+          recruiting: true,
+          voiceAgentPrompt,
+        });
+      }
+      const twimlParams: Record<string, unknown> = { ...additionalParams };
+      delete twimlParams.voiceAgentPrompt;
+      if (recruitingFlag) {
+        twimlParams.recruiting = 'true';
+      }
       const statusCallbackUrl = this.buildStatusCallbackUrl({
         baseUrl: this.configService.get<string>('TWILIO_STATUS_CALLBACK_URL'),
         flowId,
         candidateId: userId,
       });
-      const twimlUrl = this.buildTwimlRequestUrl(websocketUrl, additionalParams);
+      const twimlUrl = this.buildTwimlRequestUrl(websocketUrl, twimlParams);
       if (!twimlUrl) {
         throw new InternalServerErrorException(
           'Set TWILIO_TWIML_URL or TWILIO_STATUS_CALLBACK_URL so the outbound call can fetch TwiML from /twiml',
@@ -186,6 +196,8 @@ export class CallService {
 
     const accountSid = this.configService.get<string>('TWILIO_ACCOUNT_SID_PROD');
     const authToken = this.configService.get<string>('TWILIO_AUTH_TOKEN_PROD');
+
+    console.log({ accountSid, authToken });
 
     if (!accountSid || !authToken) {
       throw new Error('TWILIO_ACCOUNT_SID_PROD and TWILIO_AUTH_TOKEN_PROD are required');
