@@ -15,6 +15,7 @@ import {
   type ScheduleAppointmentParams,
 } from './config/function-map';
 import { VoiceAgentCrmBackTranscriptService } from './voice-agent-crm-back-transcript.service';
+import { RecruitingCallContextStore } from './call-service/recruiting-call-context.store';
 
 type CrmBackEventSourceType = 'ws_ms_events' | 'voice_agent_ms_events';
 
@@ -78,6 +79,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
     private readonly configService: ConfigService,
     @Inject('CRM_BACK_QUEUE') private readonly crmBackQueueClient: ClientProxy,
     private readonly crmBackTranscriptService: VoiceAgentCrmBackTranscriptService,
+    private readonly recruitingCallContextStore: RecruitingCallContextStore,
   ) {
     const deepgramApiKey = this.configService.get<string>('DEEPGRAM_API_KEY');
     if (!deepgramApiKey) {
@@ -149,6 +151,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
         action: 'call.completed_successfully',
         flowId: input.flowId,
         candidateId: input.candidateId,
+        ...(input.flowId.startsWith('job-campaign:') ? { recruiting: true } : {}),
         ...(trimmedContactName != null && trimmedContactName.length > 0
           ? { contactNameFromCall: trimmedContactName }
           : {}),
@@ -220,6 +223,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
         action: 'call.user_declined_onboarding',
         flowId: input.flowId,
         candidateId: input.candidateId,
+        ...(input.flowId.startsWith('job-campaign:') ? { recruiting: true } : {}),
         ...(customerIdTrim != null && customerIdTrim.length > 0
           ? { customer_id: customerIdTrim }
           : {}),
@@ -340,16 +344,29 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
 
   private isGoodbyeText(text: string | undefined): boolean {
     const t = (text ?? '').toLowerCase();
-    // Heuristic: detect common Spanish farewell fragments.
+    // Heuristic: detect common Spanish farewell / closing fragments (incl. recruiting → WhatsApp).
     return (
       t.includes('adiós') ||
       t.includes('adios') ||
       t.includes('hasta luego') ||
       t.includes('hasta pronto') ||
+      t.includes('hasta ahora') ||
+      t.includes('nos vemos') ||
       t.includes('feliz dia') ||
       t.includes('feliz día') ||
       t.includes('que tengas') ||
-      (t.includes('gracias') && (t.includes('tiempo') || t.includes('buen') || t.includes('feliz')))
+      t.includes('whatsapp') ||
+      t.includes('te escribo') ||
+      t.includes('te contacto') ||
+      t.includes('te mando') ||
+      t.includes('te envío') ||
+      t.includes('te envio') ||
+      (t.includes('gracias') &&
+        (t.includes('tiempo') ||
+          t.includes('buen') ||
+          t.includes('feliz') ||
+          t.includes('interés') ||
+          t.includes('interes')))
     );
   }
 
@@ -380,6 +397,8 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
         flowId?: string;
         customer_id?: string;
         callSid?: string;
+        recruiting?: boolean;
+        voiceAgentPrompt?: string;
         lastAssistantText?: string;
         pendingCallCompleted?: Readonly<{
           flowId: string;
@@ -415,11 +434,21 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
         emitCallCompletedSuccessfully: async (
           input: Readonly<{ flowId: string; candidateId: string }>,
         ) => {
-          callContext.pendingCallCompleted = {
+          const completed = {
             flowId: input.flowId,
             candidateId: callContext.customer_id ?? input.candidateId,
             contactNameFromCall: callContext.customer_name,
           };
+          // Recruiting: open WhatsApp as soon as interest is confirmed (do not wait for hangup).
+          if (
+            callContext.recruiting === true ||
+            completed.flowId.startsWith('job-campaign:')
+          ) {
+            await this.emitCallCompletedSuccessfullyToCrm(completed);
+            callContext.pendingCallCompleted = null;
+            return;
+          }
+          callContext.pendingCallCompleted = completed;
         },
         emitUserDeclinedDuringCall: async (input: Readonly<{ flowId: string; candidateId: string }>) => {
           await this.emitUserDeclinedDuringCallToCrm({
@@ -432,6 +461,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
           flowId: callContext.flowId,
           candidateId: callContext.customer_id,
         }),
+        isRecruiting: () => callContext.recruiting === true,
       });
 
       // Native ws connection to Deepgram (no SDK).
@@ -446,21 +476,61 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
 
       deepgramConnection.on('open', () => {
         clearTimeout(connectionTimeout);
-        // Clone config per-call to avoid leaking previous caller context.
-        const connectionAgentConfig = JSON.parse(JSON.stringify(this.agentConfigTemplate));
-
-        // Customize greeting using the customer name received in `start` event.
-        const agent = (connectionAgentConfig['agent'] as any) ?? {};
-
-        if (agent.listen?.provider) {
-          agent.listen.provider.eot_threshold = 0.5; // Reduce from 0.7
-          agent.listen.provider.eager_eot_threshold = 0.3;
-        }
-        const greetingTemplate = String(agent.greeting ?? '');
-        agent.greeting = greetingTemplate.replace('CUSTOMER_NAME', callContext.customer_name ?? '');
-        connectionAgentConfig['agent'] = agent;
-
-        deepgramConnection.send(JSON.stringify(connectionAgentConfig));
+        void (async () => {
+          await streamMetadataPromise;
+          // Clone config per-call to avoid leaking previous caller context.
+          const connectionAgentConfig = JSON.parse(JSON.stringify(this.agentConfigTemplate));
+          const agent = (connectionAgentConfig['agent'] as any) ?? {};
+          if (agent.listen?.provider) {
+            agent.listen.provider.eot_threshold = 0.5;
+            agent.listen.provider.eager_eot_threshold = 0.3;
+          }
+          const greetingTemplate = String(agent.greeting ?? '');
+          agent.greeting = greetingTemplate.replace(
+            'CUSTOMER_NAME',
+            callContext.customer_name ?? '',
+          );
+          if (
+            callContext.recruiting === true &&
+            callContext.voiceAgentPrompt != null &&
+            callContext.voiceAgentPrompt.trim().length > 0
+          ) {
+            if (agent.think == null) agent.think = {};
+            agent.think.prompt = callContext.voiceAgentPrompt;
+            agent.think.functions = [
+              {
+                name: 'getContactName',
+                description: 'Obtiene el nombre del contacto para personalizar el saludo.',
+                parameters: { type: 'object', properties: {}, required: [] },
+              },
+              {
+                name: 'confirmProcessInterest',
+                description:
+                  'Confirma que el candidato acepta continuar el proceso de reclutamiento por WhatsApp.',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    userId: { type: 'string' },
+                  },
+                  required: [],
+                },
+              },
+              {
+                name: 'declineRecruiting',
+                description: 'Marca al candidato como no interesado y finaliza la llamada.',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    userId: { type: 'string' },
+                  },
+                  required: [],
+                },
+              },
+            ];
+          }
+          connectionAgentConfig['agent'] = agent;
+          deepgramConnection.send(JSON.stringify(connectionAgentConfig));
+        })();
       });
 
       deepgramConnection.on('message', async (data: Buffer) => {
@@ -547,6 +617,22 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
             if (flow != null) {
               callContext.flowId = flow;
             }
+            const recruitingParam = pickTwilioStreamStringParam(params, [
+              'recruiting',
+            ]);
+            if (
+              recruitingParam === 'true' ||
+              (flow != null && flow.startsWith('job-campaign:'))
+            ) {
+              callContext.recruiting = true;
+              const stored = this.recruitingCallContextStore.peek(
+                flow ?? callContext.flowId ?? '',
+              );
+              if (stored != null) {
+                callContext.voiceAgentPrompt = stored.voiceAgentPrompt;
+                callContext.recruiting = true;
+              }
+            }
             const user = pickTwilioStreamStringParam(params, [
               'customer_id',
               'candidateId',
@@ -602,6 +688,10 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
       lastAssistantText?: string;
       pendingCallCompleted?: Readonly<{ flowId: string; candidateId: string }> | null;
       shouldHangupAfterAgentAudioDone?: boolean;
+      /** Recruiting: hang up after farewell TTS without classic "adiós" heuristics. */
+      hangupSkipGoodbyeCheck?: boolean;
+      /** True after confirm/decline until the next assistant ConversationText (farewell). */
+      hangupAwaitingPostToolSpeech?: boolean;
       isHangingUp?: boolean;
       transcriptSegments: Array<{ role: string; content: string }>;
       transcriptSentToCrm: boolean;
@@ -648,6 +738,9 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
     if (message.type === 'ConversationText' && message.role === 'assistant') {
       const content: string = message.content ?? '';
       callContext.lastAssistantText = content;
+      if (callContext.hangupAwaitingPostToolSpeech === true && content.trim().length > 0) {
+        callContext.hangupAwaitingPostToolSpeech = false;
+      }
     }
 
     if (message.type === 'AgentAudioDone') {
@@ -655,14 +748,30 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
         callContext.shouldHangupAfterAgentAudioDone &&
         !callContext.isHangingUp
       ) {
+        if (callContext.hangupAwaitingPostToolSpeech === true) {
+          const alreadySaidGoodbye = this.isGoodbyeText(
+            callContext.lastAssistantText,
+          );
+          if (!alreadySaidGoodbye) {
+            // Tool ran; wait until the agent speaks the farewell, then the next AgentAudioDone.
+            return;
+          }
+          callContext.hangupAwaitingPostToolSpeech = false;
+        }
         const lastAssistantText = callContext.lastAssistantText ?? '';
-        if (lastAssistantText && !this.isGoodbyeText(lastAssistantText)) {
+        const canHangup =
+          callContext.hangupSkipGoodbyeCheck === true ||
+          !lastAssistantText ||
+          this.isGoodbyeText(lastAssistantText);
+        if (!canHangup) {
           // Wait for Deepgram to finish and/or ensure the farewell is spoken.
           return;
         }
 
         callContext.isHangingUp = true;
         callContext.shouldHangupAfterAgentAudioDone = false;
+        callContext.hangupSkipGoodbyeCheck = false;
+        callContext.hangupAwaitingPostToolSpeech = false;
 
         // if (callContext.pendingCallCompleted) {
         //   await this.emitCallTranscriptIfNeeded(callContext);
@@ -702,6 +811,8 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
       customer_id?: string;
       callSid?: string;
       shouldHangupAfterAgentAudioDone?: boolean;
+      hangupSkipGoodbyeCheck?: boolean;
+      hangupAwaitingPostToolSpeech?: boolean;
       transcriptSegments: Array<{ role: string; content: string }>;
       transcriptSentToCrm: boolean;
       streamMetadataPromise?: Promise<void>;
@@ -715,9 +826,17 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
         let arguments_ = JSON.parse(functionCall.arguments || '{}');
         console.log('[handleFunctionCallRequest]', { funcName, funcId, arguments_ });
         if (funcName === 'scheduleAppointment' || funcName === 'disabledUser') {
-          // After the agent executes these tools, we want to end the call
-          // right after the agent's final audio (goodbye).
+          // After the agent executes these tools, end the call once farewell audio finishes.
           callContext.shouldHangupAfterAgentAudioDone = true;
+        }
+        if (
+          funcName === 'confirmProcessInterest' ||
+          funcName === 'declineRecruiting'
+        ) {
+          // Wait for post-tool farewell speech, then hang up when that audio finishes.
+          callContext.shouldHangupAfterAgentAudioDone = true;
+          callContext.hangupSkipGoodbyeCheck = true;
+          callContext.hangupAwaitingPostToolSpeech = true;
         }
 
         if (funcName === 'getContactName') {

@@ -19,6 +19,20 @@ export interface ScheduleAppointmentParams {
   candidateId?: string;
 }
 
+/** Params for confirmProcessInterest (recruiting). */
+export interface ConfirmProcessInterestParams {
+  userId?: string;
+  flowId?: string;
+  candidateId?: string;
+}
+
+/** Params for declineRecruiting. */
+export interface DeclineRecruitingParams {
+  userId?: string;
+  flowId?: string;
+  candidateId?: string;
+}
+
 export type EmitCallCompletedSuccessfully = (input: Readonly<{
   flowId: string;
   candidateId: string;
@@ -42,6 +56,8 @@ export type CreateFunctionMapDeps = Readonly<{
   emitUserDeclinedDuringCall: EmitUserDeclinedDuringCall;
   /** Live Twilio stream context when the model omits ids or the call races `start`. */
   getScheduleContext?: () => Readonly<{ flowId?: string; candidateId?: string }>;
+  /** When true, scheduleAppointment maps to confirmProcessInterest for recruiting. */
+  isRecruiting?: () => boolean;
 }>;
 
 function coalesceTrimmedId(primary: string | undefined, fallback: string | undefined): string {
@@ -116,7 +132,11 @@ export function createFunctionMap(deps: CreateFunctionMapDeps): FunctionMap {
         ctx.candidateId,
       );
       if (flowId.length > 0 && candidateId.length > 0) {
-        await deps.emitRequestConfirmarCapacitacion({ candidateId, flowId });
+        if (deps.isRecruiting?.() === true) {
+          await deps.emitCallCompletedSuccessfully({ candidateId, flowId });
+        } else {
+          await deps.emitRequestConfirmarCapacitacion({ candidateId, flowId });
+        }
       } else {
         console.warn(
           '[scheduleAppointment] skipping CRM signals: missing flowId or candidateId (Twilio <Parameter>: flowId; customer_id / candidateId)',
@@ -124,6 +144,36 @@ export function createFunctionMap(deps: CreateFunctionMapDeps): FunctionMap {
         );
       }
       return { success: true, message: 'Cita agendada para la capacitación.' };
+    },
+
+    async confirmProcessInterest(args: ConfirmProcessInterestParams) {
+      console.log('[confirmProcessInterest] called with params:', args);
+      const ctx = deps.getScheduleContext?.() ?? {};
+      const flowId = coalesceTrimmedId(args?.flowId, ctx.flowId);
+      const candidateId = pickScheduleCandidateIdForCrm(
+        args?.candidateId,
+        args?.userId,
+        ctx.candidateId,
+      );
+      if (flowId.length > 0 && candidateId.length > 0) {
+        await deps.emitCallCompletedSuccessfully({ candidateId, flowId });
+      }
+      return { success: true, message: 'Interés confirmado; el proceso continúa por WhatsApp.' };
+    },
+
+    async declineRecruiting(args: DeclineRecruitingParams) {
+      console.log('[declineRecruiting] called with params:', args);
+      const ctx = deps.getScheduleContext?.() ?? {};
+      const flowId = coalesceTrimmedId(args?.flowId, ctx.flowId);
+      const candidateId = pickScheduleCandidateIdForCrm(
+        args?.candidateId,
+        args?.userId,
+        ctx.candidateId,
+      );
+      if (flowId.length > 0 && candidateId.length > 0) {
+        await deps.emitUserDeclinedDuringCall({ candidateId, flowId });
+      }
+      return { success: true, message: 'Candidato marcado como no interesado.' };
     },
   };
 }
