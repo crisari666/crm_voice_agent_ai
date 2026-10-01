@@ -65,6 +65,12 @@ function pickTwilioStreamStringParam(
   return undefined;
 }
 
+/** Appended to every recruiting prompt so campaign edits cannot remove the tool contract. */
+const RECRUITING_TOOL_INSTRUCTIONS = `## Instrucciones obligatorias de herramientas
+- En cuanto el candidato acepte o esté de acuerdo en continuar (por ejemplo "sí", "ok", "okay", "de acuerdo", "claro", "listo"), llama a confirmProcessInterest inmediatamente, antes de despedirte. Esa herramienta envía el mensaje de WhatsApp.
+- Si el candidato dice que no está interesado, llama a declineRecruiting y despídete brevemente.
+- Llama cada herramienta como máximo una vez y nunca menciones las herramientas al candidato.`;
+
 /** `answeredBy` value when voicemail is inferred from live STT (not Twilio AMD). */
 const VOICEMAIL_ANSWERED_BY_FROM_CONVERSATION = 'conversation_voicemail';
 
@@ -496,7 +502,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
             callContext.voiceAgentPrompt.trim().length > 0
           ) {
             if (agent.think == null) agent.think = {};
-            agent.think.prompt = callContext.voiceAgentPrompt;
+            agent.think.prompt = `${callContext.voiceAgentPrompt.trim()}\n\n${RECRUITING_TOOL_INSTRUCTIONS}`;
             agent.think.functions = [
               {
                 name: 'getContactName',
@@ -506,7 +512,7 @@ export class TwilioGateway implements OnGatewayInit, OnGatewayConnection {
               {
                 name: 'confirmProcessInterest',
                 description:
-                  'Confirma que el candidato acepta continuar el proceso de reclutamiento por WhatsApp.',
+                  'Llamar inmediatamente cuando el candidato acepte continuar el proceso por WhatsApp; esto envía el mensaje de WhatsApp.',
                 parameters: {
                   type: 'object',
                   properties: {
